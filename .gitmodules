@@ -1,0 +1,12 @@
+[submodule "extensions/modly-hunyuan3d-mini-extension"]
+	path = extensions/modly-hunyuan3d-mini-extension
+	url = git@github.com:kojeomstudio/modly-hunyuan3d-mini-extension.git
+[submodule "extensions/modly-hunyuan3d-mini-turbo-extension"]
+	path = extensions/modly-hunyuan3d-mini-turbo-extension
+	url = git@github.com:kojeomstudio/modly-hunyuan3d-mini-turbo-extension.git
+[submodule "extensions/modly-trellis2-extension"]
+	path = extensions/modly-trellis2-extension
+	url = git@github.com:kojeomstudio/modly-trellis2-extension.git
+[submodule "extensions/modly-trellis2-gguf-extension"]
+	path = extensions/modly-trellis2-gguf-extension
+	url = git@github.com:kojeomstudio/modly-trellis2-gguf-extension.git
