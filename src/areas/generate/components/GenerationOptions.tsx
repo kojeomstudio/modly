@@ -280,7 +280,7 @@ function ModelSelect({ models, value, onChange }: ModelSelectProps): JSX.Element
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function GenerationOptions(): JSX.Element {
-  const { generationOptions, setGenerationOptions, currentJob, apiUrl } = useAppStore()
+  const { generationOptions, setGenerationOptions, currentJob, apiUrl, apiToken } = useAppStore()
   const [models, setModels] = useState<CatalogModel[]>([])
   const [textureResolutionRaw, setTextureResolutionRaw] = useState(
     String(generationOptions.textureResolution ?? 512)
@@ -308,7 +308,9 @@ export default function GenerationOptions(): JSX.Element {
       return
     }
 
-    fetch(`${apiUrl}/model/params?model_id=${encodeURIComponent(modelId)}`)
+    fetch(`${apiUrl}/model/params?model_id=${encodeURIComponent(modelId)}`, {
+      headers: apiToken ? { 'X-Modly-Token': apiToken } : undefined,
+    })
       .then((res) => res.json())
       .then((params: ParamSchema[]) => {
         schemaCache.current[modelId] = params
@@ -316,7 +318,7 @@ export default function GenerationOptions(): JSX.Element {
         initDefaults(params)
       })
       .catch(() => setSchema([]))
-  }, [generationOptions.modelId, apiUrl])
+  }, [generationOptions.modelId, apiUrl, apiToken])
 
   function initDefaults(params: ParamSchema[]) {
     const current = generationOptions.modelParams

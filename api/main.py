@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi import HTTPException
 
 from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs
+from services.auth import TokenAuthMiddleware
 
 
 @asynccontextmanager
@@ -42,6 +43,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Token-based auth — defends against same-origin browser tabs probing the
+# loopback API. No-op when MODLY_API_TOKEN env var is unset (manual dev).
+app.add_middleware(TokenAuthMiddleware)
+
 app.include_router(status.router)
 app.include_router(settings.router)
 app.include_router(model.router,      prefix="/model")
@@ -55,7 +60,13 @@ app.include_router(workflow_runs.router,   prefix="/workflow-runs")
 @app.get("/workspace/{full_path:path}")
 async def serve_workspace_file(full_path: str):
     import services.generator_registry as reg
-    file_path = reg.WORKSPACE_DIR / full_path
-    if not file_path.exists() or not file_path.is_file():
+    workspace_root = reg.WORKSPACE_DIR.resolve()
+    file_path = (workspace_root / full_path).resolve()
+    # Reject anything that resolves outside WORKSPACE_DIR (path traversal guard).
+    try:
+        file_path.relative_to(workspace_root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="File not found")
+    if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(str(file_path))

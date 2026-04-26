@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from 'child_process'
 import { join } from 'path'
+import { randomBytes } from 'crypto'
 import { app, BrowserWindow } from 'electron'
 import { existsSync, mkdirSync } from 'fs'
 import axios from 'axios'
@@ -10,6 +11,7 @@ import { cleanPythonEnv, getVenvPythonExe } from './python-setup'
 const API_PORT = 8765
 const API_HOST = '127.0.0.1'
 export const API_BASE_URL = `http://${API_HOST}:${API_PORT}`
+export const API_TOKEN_HEADER = 'X-Modly-Token'
 
 export class PythonBridge {
   private process: ChildProcess | null = null
@@ -17,6 +19,20 @@ export class PythonBridge {
   private startPromise: Promise<void> | null = null
   private getWindow: (() => BrowserWindow | null) | null = null
   private intentionalStop = false
+  // Per-launch random token. Same value passed to FastAPI via env (MODLY_API_TOKEN)
+  // and to the renderer via app:info IPC, so all callers can attach the
+  // X-Modly-Token header. Defends loopback API against same-machine browser tabs.
+  private readonly apiToken: string = randomBytes(32).toString('hex')
+
+  constructor() {
+    // Inject token into the global axios defaults used by the main process so
+    // every axios.* call originating from main automatically authenticates.
+    axios.defaults.headers.common[API_TOKEN_HEADER] = this.apiToken
+  }
+
+  getApiToken(): string {
+    return this.apiToken
+  }
 
   setWindowGetter(fn: () => BrowserWindow | null): void {
     this.getWindow = fn
@@ -59,6 +75,7 @@ export class PythonBridge {
         SELECTED_MODEL_ID:         process.env['SELECTED_MODEL_ID'] ?? '',
         HUGGING_FACE_HUB_TOKEN:    this.resolveHfToken(),
         HF_TOKEN:                  this.resolveHfToken(),
+        MODLY_API_TOKEN:           this.apiToken,
       }
     })
 
@@ -82,7 +99,7 @@ export class PythonBridge {
       this.ready = false
       this.process = null
       if (wasReady && !this.intentionalStop) {
-        this.getWindow()?.webContents.send('python:crashed', { code })
+        this.getWindow?.()?.webContents.send('python:crashed', { code })
       }
     })
 
@@ -114,7 +131,7 @@ export class PythonBridge {
   private emitTqdmLog(raw: string): void {
     if (/INFO/.test(raw)) return
     if (!raw.trim()) return
-    this.getWindow()?.webContents.send('python:log', raw.trim())
+    this.getWindow?.()?.webContents.send('python:log', raw.trim())
   }
 
   isReady(): boolean { return this.ready }

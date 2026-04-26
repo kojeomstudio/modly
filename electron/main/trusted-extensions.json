@@ -1,0 +1,10 @@
+{
+  "_comment": "Vendored allowlist of GitHub repos whose extensions get the 'trusted' badge. Listed here so the trust source is auditable in source control rather than fetched from a single mutable third-party URL. Extend this file or place a copy at <userData>/trusted-extensions.json to override per machine.",
+  "trusted_repos": [
+    "https://github.com/lightningpixel/modly-hunyuan3d-mini-extension",
+    "https://github.com/lightningpixel/modly-hunyuan3d-mini-turbo-extension",
+    "https://github.com/lightningpixel/modly-hunyuan3d-mini-fast-extension",
+    "https://github.com/lightningpixel/modly-triposg-extension",
+    "https://github.com/lightningpixel/modly-trellis2-gguf-extension"
+  ]
+}

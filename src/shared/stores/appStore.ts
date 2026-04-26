@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import axios from 'axios'
 
 export type BackendStatus = 'not_started' | 'starting' | 'ready' | 'error'
 export type SetupStatus = 'idle' | 'checking' | 'needed' | 'installing' | 'done' | 'error'
@@ -48,6 +49,7 @@ interface AppState {
   // Backend
   backendStatus: BackendStatus
   apiUrl: string
+  apiToken: string
   backendError: string | null
 
   // Current generation
@@ -106,6 +108,7 @@ export const useAppStore = create<AppState>()(
     (set, get) => ({
       backendStatus: 'not_started',
       apiUrl: '',
+      apiToken: '',
       backendError: null,
 
       setupStatus: 'idle',
@@ -195,15 +198,22 @@ export const useAppStore = create<AppState>()(
         window.electron.python.offCrashed()
         window.electron.python.onCrashed(({ code }) => {
           const msg = `FastAPI process crashed unexpectedly (exit code: ${code ?? 'unknown'})`
-          set({ backendStatus: 'error', apiUrl: '', backendError: msg })
+          set({ backendStatus: 'error', apiUrl: '', apiToken: '', backendError: msg })
           get().showError(msg)
         })
 
         try {
           const result = await window.electron.python.start()
           if (!result.success) throw new Error(result.error ?? 'Failed to start backend')
-          const { apiUrl } = await window.electron.app.info()
-          set({ backendStatus: 'ready', apiUrl })
+          const { apiUrl, apiToken } = await window.electron.app.info()
+          // Inject the per-launch API token into axios defaults so every
+          // axios.create({ baseURL: apiUrl }) call (and direct axios.*) carries
+          // the X-Modly-Token header. Defends against same-machine cross-origin
+          // requests from arbitrary browser tabs hitting 127.0.0.1:8765.
+          if (apiToken) {
+            axios.defaults.headers.common['X-Modly-Token'] = apiToken
+          }
+          set({ backendStatus: 'ready', apiUrl, apiToken })
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           set({ backendStatus: 'error', backendError: msg })

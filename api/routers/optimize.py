@@ -44,9 +44,12 @@ def optimize_mesh(body: OptimizeRequest):
     _require_pymeshlab()
     target_faces = max(100, min(500_000, body.target_faces))
 
-    # Security: prevent path traversal
+    # Security: prevent path traversal (use relative_to instead of startswith
+    # to avoid sibling-prefix aliasing like /workspace-evil matching /workspace).
     input_path = (WORKSPACE_DIR / body.path).resolve()
-    if not str(input_path).startswith(str(WORKSPACE_DIR.resolve())):
+    try:
+        input_path.relative_to(WORKSPACE_DIR.resolve())
+    except ValueError:
         raise HTTPException(400, "Invalid path")
     if not input_path.exists():
         raise HTTPException(404, f"File not found: {body.path}")
@@ -147,7 +150,9 @@ def smooth_mesh(body: SmoothRequest):
     iterations = max(1, min(20, body.iterations))
 
     input_path = (WORKSPACE_DIR / body.path).resolve()
-    if not str(input_path).startswith(str(WORKSPACE_DIR.resolve())):
+    try:
+        input_path.relative_to(WORKSPACE_DIR.resolve())
+    except ValueError:
         raise HTTPException(400, "Invalid path")
     if not input_path.exists():
         raise HTTPException(404, f"File not found: {body.path}")
@@ -256,7 +261,9 @@ def export_mesh(path: str, format: str):
         raise HTTPException(400, "Supported formats: obj, stl, ply")
 
     input_path = (WORKSPACE_DIR / path).resolve()
-    if not str(input_path).startswith(str(WORKSPACE_DIR.resolve())):
+    try:
+        input_path.relative_to(WORKSPACE_DIR.resolve())
+    except ValueError:
         raise HTTPException(400, "Invalid path")
     if not input_path.exists():
         raise HTTPException(404, f"File not found: {path}")

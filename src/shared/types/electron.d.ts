@@ -160,6 +160,7 @@ declare global {
           userData:  string
           modelsDir: string
           apiUrl:    string
+          apiToken:  string
         }>
         onError:  (cb: (message: string) => void) => void
         offError: () => void

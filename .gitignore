@@ -2,6 +2,20 @@ node_modules/
 out/
 dist/
 
+# TypeScript composite-build emit (electron/main, src/**) and tsbuildinfo.
+# Real build goes through electron-vite; tsc --build is only used for
+# noEmit type-checking but accidentally emits unless --noEmit is passed.
+*.tsbuildinfo
+electron/**/*.js
+electron/**/*.d.ts
+electron.vite.config.js
+electron.vite.config.d.ts
+src/**/*.d.ts
+src/**/*.js
+# Allow legitimate hand-written declarations / scripts / config
+!src/shared/types/electron.d.ts
+!src/vite-env.d.ts
+
 # Generated at build time by scripts/download-python-embed.js
 resources/python-embed/
 resources/get-pip.py

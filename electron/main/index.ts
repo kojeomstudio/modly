@@ -33,8 +33,18 @@ function createWindow(): void {
     mainWindow?.show()
   })
 
+  // Restrict window.open / target=_blank to safe web/mail schemes only.
+  // Mirrors the allowlist applied to ipcMain shell:openExternal.
+  const ALLOWED_OPEN_SCHEMES = new Set(['http:', 'https:', 'mailto:'])
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    try {
+      const scheme = new URL(details.url).protocol
+      if (ALLOWED_OPEN_SCHEMES.has(scheme)) {
+        shell.openExternal(details.url)
+      }
+    } catch {
+      // invalid URL — silently drop
+    }
     return { action: 'deny' }
   })
 

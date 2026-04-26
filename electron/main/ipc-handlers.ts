@@ -18,6 +18,7 @@ import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
 import { spawn } from 'child_process'
+import vendoredTrustedExtensions from './trusted-extensions.json'
 
 type WindowGetter = () => BrowserWindow | null
 
@@ -333,15 +334,31 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
-  // Shell
-  ipcMain.handle('shell:openExternal', (_, url: string) => shell.openExternal(url))
+  // Shell — restrict openExternal to safe web/mail schemes only.
+  // Without this, a renderer (or compromised dependency rendering untrusted text)
+  // could pass file:// or custom OS-protocol URLs and trigger native handlers.
+  const ALLOWED_OPEN_SCHEMES = new Set(['http:', 'https:', 'mailto:'])
+  ipcMain.handle('shell:openExternal', (_, url: string) => {
+    try {
+      const scheme = new URL(url).protocol
+      if (!ALLOWED_OPEN_SCHEMES.has(scheme)) {
+        logger.warn(`[shell:openExternal] blocked unsupported scheme: ${scheme}`)
+        return { success: false, error: `Unsupported URL scheme: ${scheme}` }
+      }
+      return shell.openExternal(url).then(() => ({ success: true }))
+    } catch (err) {
+      logger.warn(`[shell:openExternal] invalid URL: ${String(err)}`)
+      return { success: false, error: 'Invalid URL' }
+    }
+  })
 
   // App info
   ipcMain.handle('app:info', () => ({
     version:   app.getVersion(),
     userData:  app.getPath('userData'),
     modelsDir: getSettings(app.getPath('userData')).modelsDir,
-    apiUrl:    API_BASE_URL
+    apiUrl:    API_BASE_URL,
+    apiToken:  pythonBridge.getApiToken(),
   }))
 
   // Settings — seed HF token into main-process env at startup
@@ -487,31 +504,41 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
-  // Remote registry — list of trusted GitHub repo URLs
-  const REGISTRY_URL = 'https://raw.githubusercontent.com/liightnig125/modly-official-extension/main/registry.json'
-  const REGISTRY_TTL = 5 * 60 * 1000 // 5 minutes
+  // Trusted-extensions allowlist.
+  // Source of truth: vendored electron/main/trusted-extensions.json (in this
+  // repo, auditable). Optional per-machine override: <userData>/trusted-extensions.json.
+  // Replaces the previous design which fetched the list from a single
+  // third-party GitHub raw URL — that URL pointed to an account whose name
+  // resembled a typo squat, which made the 'trusted' badge tamperable by a
+  // single account compromise. Local-ops scope assumes the user wants a
+  // static, auditable list rather than a remote one.
+  let registryCache: Set<string> | null = null
 
-  let registryCache: { repos: Set<string>; fetchedAt: number } | null = null
+  function normalizeRepo(r: string): string {
+    return r.toLowerCase().replace(/\/$/, '')
+  }
 
   async function fetchTrustedRepos(): Promise<Set<string>> {
-    const now = Date.now()
-    if (registryCache && now - registryCache.fetchedAt < REGISTRY_TTL) {
-      return registryCache.repos
+    if (registryCache) return registryCache
+    const repos = new Set<string>()
+    // 1. User override at <userData>/trusted-extensions.json wins if present.
+    const userOverride = join(app.getPath('userData'), 'trusted-extensions.json')
+    if (existsSync(userOverride)) {
+      try {
+        const raw  = await readFile(userOverride, 'utf-8')
+        const data = JSON.parse(raw) as { trusted_repos?: string[] }
+        for (const r of data.trusted_repos ?? []) repos.add(normalizeRepo(r))
+      } catch (err) {
+        logger.warn(`[trusted-extensions] failed to read ${userOverride}: ${String(err)}`)
+      }
     }
-    try {
-      const { net } = require('electron')
-      const res = await net.fetch(REGISTRY_URL)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json() as { trusted_repos?: string[] }
-      const repos = new Set(
-        (data.trusted_repos ?? []).map((r: string) => r.toLowerCase().replace(/\/$/, ''))
-      )
-      registryCache = { repos, fetchedAt: now }
-      return repos
-    } catch {
-      // Offline or fetch failed — keep previous cache, or empty
-      return registryCache?.repos ?? new Set()
+    // 2. Fall back to the vendored allowlist bundled with the app.
+    if (repos.size === 0) {
+      const vendored = vendoredTrustedExtensions as { trusted_repos?: string[] }
+      for (const r of vendored.trusted_repos ?? []) repos.add(normalizeRepo(r))
     }
+    registryCache = repos
+    return repos
   }
 
   function isTrustedSource(source: string | undefined, trustedRepos: Set<string>): boolean {
@@ -522,7 +549,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   type ParsedManifest = {
     id?: string; name?: string; displayName?: string; version?: string
     description?: string; author?: string | { name?: string }
-    source?: string; generator_class?: string
+    source?: string; installed_ref?: string; generator_class?: string
     // extension type
     type?:  'model' | 'process'
     entry?: string
@@ -541,13 +568,14 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   function parseExtensionManifest(parsed: ParsedManifest, fallbackId: string, trustedRepos: Set<string>, builtin = false) {
     const common = {
-      id:          parsed.id          ?? fallbackId,
-      name:        parsed.displayName ?? parsed.name ?? fallbackId,
-      version:     parsed.version,
-      description: parsed.description,
-      author:      typeof parsed.author === 'string' ? parsed.author : parsed.author?.name,
-      trusted:     builtin || isTrustedSource(parsed.source, trustedRepos),
-      source:      parsed.source,
+      id:           parsed.id          ?? fallbackId,
+      name:         parsed.displayName ?? parsed.name ?? fallbackId,
+      version:      parsed.version,
+      description:  parsed.description,
+      author:       typeof parsed.author === 'string' ? parsed.author : parsed.author?.name,
+      trusted:      builtin || isTrustedSource(parsed.source, trustedRepos),
+      source:       parsed.source,
+      installedRef: parsed.installed_ref,
       builtin,
     }
 
@@ -621,24 +649,48 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     let extractDir = ''
 
     try {
-      // 1. Parse and validate GitHub URL
+      // 1. Parse and validate GitHub URL.
+      //
+      // Accepted forms (all optionally end with #<ref> or /tree/<ref>
+      // or /commit/<sha> to pin a specific commit/tag/branch):
+      //   https://github.com/owner/repo
+      //   https://github.com/owner/repo#<ref>
+      //   https://github.com/owner/repo/tree/<ref>
+      //   https://github.com/owner/repo/commit/<sha>
+      //
+      // The codeload mirror is used instead of the api.github.com tarball
+      // endpoint so anonymous downloads aren't subject to GitHub's 60-req/h
+      // rate limit and so we can address an exact ref deterministically.
       const parsed  = new URL(githubUrl.trim())
       if (parsed.hostname !== 'github.com') throw new Error('Invalid URL: must be a GitHub repository (github.com)')
       const parts = parsed.pathname.split('/').filter(Boolean)
       if (parts.length < 2) throw new Error('Invalid URL: expected format https://github.com/owner/repo')
       const [owner, repo] = parts
 
+      // Resolve which ref to install. Default 'HEAD' preserves prior behavior
+      // (always grab the default branch tip).
+      let ref = 'HEAD'
+      if (parts[2] === 'tree' && parts[3]) {
+        ref = parts.slice(3).join('/')
+      } else if (parts[2] === 'commit' && parts[3]) {
+        ref = parts[3]
+      } else if (parsed.hash) {
+        ref = parsed.hash.slice(1) // strip leading '#'
+      }
+      // Codeload disallows '/' inside the ref segment, so encode it.
+      const refPathSegment = encodeURIComponent(ref)
+
       emit({ step: 'downloading', percent: 0 })
 
-      // 2. Download tarball via GitHub API
-      const tarballUrl = `https://api.github.com/repos/${owner}/${repo}/tarball/HEAD`
+      // 2. Download tarball from codeload (anonymous, no API rate limit).
+      const tarballUrl = `https://codeload.github.com/${owner}/${repo}/tar.gz/${refPathSegment}`
       tarPath    = join(tmpDir, `modly-ext-${Date.now()}.tar.gz`)
       extractDir = join(tmpDir, `modly-ext-extract-${Date.now()}`)
 
       const response = await axios.get(tarballUrl, {
         responseType: 'arraybuffer',
         headers: {
-          'Accept':     'application/vnd.github.v3+json',
+          'Accept':     'application/vnd.github.v3.raw',
           'User-Agent': 'Modly-App',
         },
         onDownloadProgress: (evt) => {
@@ -681,8 +733,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         if (!manifest.generator_class)  throw new Error('manifest.json: required field "generator_class" missing')
       }
 
-      // Override source field with the actual GitHub URL so trust is based on origin
-      manifest.source = `https://github.com/${owner}/${repo}`
+      // Override source field with the actual GitHub URL so trust is based on
+      // origin. Also persist the resolved ref so the user can later audit
+      // which exact tag/commit/branch this extension was installed from.
+      manifest.source        = `https://github.com/${owner}/${repo}`
+      manifest.installed_ref = ref
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8')
 
       // 5. Copy to extensions directory (overwrite if already present)

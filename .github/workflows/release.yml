@@ -41,7 +41,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Download Python embed
         run: node scripts/download-python-embed.js
@@ -79,7 +79,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Download Python embed
         run: node scripts/download-python-embed.js

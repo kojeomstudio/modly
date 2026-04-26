@@ -7,10 +7,11 @@
     "lib": ["ES2022"],
     "strict": true,
     "skipLibCheck": true,
+    "resolveJsonModule": true,
     "types": ["electron-vite/node"],
     "paths": {
       "@main/*": ["./electron/main/*"]
     }
   },
-  "include": ["electron.vite.config.*", "electron/**/*"]
+  "include": ["electron.vite.config.*", "electron/**/*", "electron/**/*.json"]
 }

@@ -226,7 +226,8 @@ export default function ModelsPage(): JSX.Element {
                 value={ghUrl}
                 onChange={(e) => { setGhUrl(e.target.value); setGhErr(null); clearInstall() }}
                 onKeyDown={(e) => e.key === 'Enter' && !isInstalling && handleGHInstall()}
-                placeholder="https://github.com/owner/repo"
+                placeholder="https://github.com/owner/repo  (optionally #ref or /tree/<tag>)"
+                title="Append #<sha-or-tag> or /tree/<branch> to pin a specific revision instead of the default branch."
                 autoFocus
                 disabled={isInstalling}
                 className="flex-1 px-3 py-2 text-xs rounded-lg bg-zinc-800 border border-zinc-700/60 text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500 transition-colors disabled:opacity-50"
