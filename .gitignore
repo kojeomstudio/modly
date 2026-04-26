@@ -17,6 +17,11 @@ api/venv/
 # Models (heavy, downloaded at runtime)
 /models/
 
+# Local runtime data (models / workspace / extensions / workflows / dependencies)
+# Created and populated by run-local.sh and the app at runtime.
+/datas/
+/output/
+
 # Logs
 *.log
 npm-debug.log*
