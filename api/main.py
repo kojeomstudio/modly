@@ -36,16 +36,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Token-based auth — defends against same-origin browser tabs probing the
+# loopback API. No-op when MODLY_API_TOKEN env var is unset (manual dev).
+# Added FIRST so it sits INSIDE CORSMiddleware (Starlette inserts middleware
+# at index 0 → last-added is outermost). This lets CORS handle OPTIONS
+# preflight responses (which never carry custom headers like X-Modly-Token)
+# before they reach the auth check.
+app.add_middleware(TokenAuthMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Token-based auth — defends against same-origin browser tabs probing the
-# loopback API. No-op when MODLY_API_TOKEN env var is unset (manual dev).
-app.add_middleware(TokenAuthMiddleware)
 
 app.include_router(status.router)
 app.include_router(settings.router)
