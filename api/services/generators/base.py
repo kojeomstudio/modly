@@ -20,20 +20,41 @@ def smooth_progress(
     interval: float = 3.0,
 ) -> None:
     """
-    Smoothly increments progress between start and end while a
+    Asymptotically increments progress between start and end-2 while a
     long-running operation runs without being able to emit callbacks.
-    Stops as soon as stop is set.
-    """
-    current   = start
-    max_reach = end - 2
-    increment = max(1, (end - start) // 10)
 
-    while current < max_reach and not stop.is_set():
+    Earlier versions used a fixed linear schedule that capped at end-2
+    after ~30 seconds. On MPS / CPU some pipelines run for 20+ minutes,
+    so the bar would sit motionless at e.g. 80% for the entire compute
+    phase and the UI looked dead. The asymptotic schedule keeps ticking
+    until stop is set, so it never gives up early and never overshoots.
+
+    Decay / floor are tuned by range so the same function fits both the
+    short pre-load phase (0→9, target ~30 s) and the long inference
+    phase (12→82, target many minutes): a wide range plateaus much
+    later, a narrow one converges quickly.
+    """
+    current = float(start)
+    target  = float(end - 2)
+    if target <= current:
+        return
+    span  = end - start
+    # Wide ranges (multi-minute compute) — slow climb, stays under 80%
+    # for the bulk of the run. Narrow ranges (~10 s loads) — quick climb.
+    decay = 0.02 if span > 20 else 0.10
+    floor = 0.05 if span > 20 else 0.30
+    last_reported = -1
+
+    while not stop.is_set():
         stop.wait(interval)
         if stop.is_set():
             break
-        current = min(current + increment, max_reach)
-        progress_cb(current, label)
+        step    = max(floor, (target - current) * decay)
+        current = min(target, current + step)
+        rounded = int(current)
+        if rounded != last_reported:
+            progress_cb(rounded, label)
+            last_reported = rounded
 
 
 class BaseGenerator(ABC):
