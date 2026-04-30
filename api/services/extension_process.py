@@ -43,7 +43,14 @@ class ExtensionProcess:
 
         self._proc:   Optional[subprocess.Popen] = None
         self._queue:  queue.Queue                = queue.Queue()
-        self._lock:   threading.Lock             = threading.Lock()
+        # _send_lock guards stdin writes so two concurrent _send() calls can't
+        # interleave bytes inside one JSON line.
+        self._send_lock:    threading.Lock = threading.Lock()
+        # _request_lock guards an entire send/recv cycle (load/generate/unload).
+        # Without it, two background tasks calling load()/generate() at the
+        # same time would both pull from self._queue and steal each other's
+        # responses — manifesting as 'Unexpected response to load: {ready…}'.
+        self._request_lock: threading.Lock = threading.Lock()
         self._loaded: bool                       = False
 
         # Mirrors BaseGenerator attributes used by the registry
@@ -132,7 +139,7 @@ class ExtensionProcess:
             print(f"[{self.MODEL_ID}] {line}", end="", file=sys.stderr)
 
     def _send(self, msg: dict) -> None:
-        with self._lock:
+        with self._send_lock:
             self._proc.stdin.write(json.dumps(msg) + "\n")
             self._proc.stdin.flush()
 
@@ -147,6 +154,16 @@ class ExtensionProcess:
 
     def _ensure_started(self) -> None:
         if self._proc is None or self._proc.poll() is not None:
+            # Drain any stale messages from a previous (now dead) subprocess
+            # before spawning a new one. Without this, a leftover sentinel
+            # (None) or trailing message would be picked up by the next
+            # _recv() instead of the new process's 'ready' line.
+            try:
+                while True:
+                    self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._loaded = False
             self._start()
 
     # ------------------------------------------------------------------ #
@@ -162,25 +179,29 @@ class ExtensionProcess:
         return self._loaded and self._proc is not None and self._proc.poll() is None
 
     def load(self) -> None:
-        self._ensure_started()
-        self._send({"action": "load"})
+        with self._request_lock:
+            if self._loaded and self._proc is not None and self._proc.poll() is None:
+                return
+            self._ensure_started()
+            self._send({"action": "load"})
 
-        msg = self._recv(timeout=None)  # model load can be arbitrarily slow
-        if msg.get("type") == "loaded":
-            self._loaded = True
-        elif msg.get("type") == "error":
-            raise RuntimeError(msg.get("traceback") or msg.get("message"))
-        else:
-            raise RuntimeError(f"[{self.MODEL_ID}] Unexpected response to load: {msg}")
+            msg = self._recv(timeout=None)  # model load can be arbitrarily slow
+            if msg.get("type") == "loaded":
+                self._loaded = True
+            elif msg.get("type") == "error":
+                raise RuntimeError(msg.get("traceback") or msg.get("message"))
+            else:
+                raise RuntimeError(f"[{self.MODEL_ID}] Unexpected response to load: {msg}")
 
     def unload(self) -> None:
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._send({"action": "unload"})
-                self._recv(timeout=30.0)
-            except Exception:
-                pass
-        self._loaded = False
+        with self._request_lock:
+            if self._proc and self._proc.poll() is None:
+                try:
+                    self._send({"action": "unload"})
+                    self._recv(timeout=30.0)
+                except Exception:
+                    pass
+            self._loaded = False
 
     def generate(
         self,
@@ -191,51 +212,55 @@ class ExtensionProcess:
     ) -> Path:
         from services.generators.base import GenerationCancelled
 
-        req_id = str(uuid.uuid4())
-        self._send({
-            "action":      "generate",
-            "id":          req_id,
-            "image_b64":   base64.b64encode(image_bytes).decode(),
-            "params":      params,
-            "outputs_dir": str(self.outputs_dir) if self.outputs_dir else None,
-        })
+        # Serialise the whole IPC round-trip. Two concurrent generate() calls
+        # would otherwise share self._queue and pick up each other's messages
+        # (progress, done, error) in arbitrary order.
+        with self._request_lock:
+            req_id = str(uuid.uuid4())
+            self._send({
+                "action":      "generate",
+                "id":          req_id,
+                "image_b64":   base64.b64encode(image_bytes).decode(),
+                "params":      params,
+                "outputs_dir": str(self.outputs_dir) if self.outputs_dir else None,
+            })
 
-        while True:
-            # Check for cancellation
-            if cancel_event and cancel_event.is_set():
-                self._send({"action": "cancel", "id": req_id})
-                # Drain until the subprocess acknowledges
-                while True:
-                    msg = self._recv(timeout=30.0)
-                    if msg.get("type") in ("cancelled", "done", "error"):
-                        raise GenerationCancelled()
+            while True:
+                # Check for cancellation
+                if cancel_event and cancel_event.is_set():
+                    self._send({"action": "cancel", "id": req_id})
+                    # Drain until the subprocess acknowledges
+                    while True:
+                        msg = self._recv(timeout=30.0)
+                        if msg.get("type") in ("cancelled", "done", "error"):
+                            raise GenerationCancelled()
 
-            # Poll queue with short timeout so we can re-check cancel_event
-            try:
-                msg = self._queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
+                # Poll queue with short timeout so we can re-check cancel_event
+                try:
+                    msg = self._queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
 
-            if msg is None:
-                raise RuntimeError(f"[{self.MODEL_ID}] Subprocess died during generation")
+                if msg is None:
+                    raise RuntimeError(f"[{self.MODEL_ID}] Subprocess died during generation")
 
-            t = msg.get("type")
+                t = msg.get("type")
 
-            if t == "progress":
-                if progress_cb:
-                    progress_cb(msg.get("pct", 0), msg.get("step", ""))
+                if t == "progress":
+                    if progress_cb:
+                        progress_cb(msg.get("pct", 0), msg.get("step", ""))
 
-            elif t == "done":
-                return Path(msg["output_path"])
+                elif t == "done":
+                    return Path(msg["output_path"])
 
-            elif t == "error":
-                raise RuntimeError(msg.get("traceback") or msg.get("message", "Unknown error"))
+                elif t == "error":
+                    raise RuntimeError(msg.get("traceback") or msg.get("message", "Unknown error"))
 
-            elif t == "cancelled":
-                raise GenerationCancelled()
+                elif t == "cancelled":
+                    raise GenerationCancelled()
 
-            elif t == "log":
-                print(f"[{self.MODEL_ID}] {msg.get('message', '')}", file=sys.stderr)
+                elif t == "log":
+                    print(f"[{self.MODEL_ID}] {msg.get('message', '')}", file=sys.stderr)
 
     def params_schema(self) -> list:
         return self._params_schema
