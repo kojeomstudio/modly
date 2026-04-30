@@ -25,7 +25,14 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Generation runs can take 30+ minutes; users routinely switch to
+      // another window while waiting. Chromium's default timer throttling
+      // would slow our 1.2 s poll loop in workflowRunStore down to once per
+      // minute when the window is unfocused, which makes the progress bar
+      // appear frozen and delays the 'done' transition long after the GLB
+      // is on disk.
+      backgroundThrottling: false,
     }
   })
 
