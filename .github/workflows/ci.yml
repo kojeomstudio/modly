@@ -87,24 +87,3 @@ jobs:
         run: sudo apt-get install -y rpm
       - name: Build & Package (Linux)
         run: npx electron-vite build && npx electron-builder --linux --publish never
-
-  build-macos:
-    needs: typecheck
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm ci
-      - name: Download Python embed (arm64)
-        run: node scripts/download-python-embed.js
-      # CI builds are unsigned — release.yml handles notarized builds when
-      # APPLE_* secrets are present. CSC_IDENTITY_AUTO_DISCOVERY=false stops
-      # electron-builder from picking a stray identity in the runner keychain.
-      - name: Build & Package (macOS arm64)
-        run: npx electron-vite build && npx electron-builder --mac --arm64 --publish never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false

@@ -15,6 +15,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
@@ -250,27 +251,52 @@ class ExtensionProcess:
             })
 
             while True:
-                # Check for cancellation
+                # ── Cancellation paths ──────────────────────────────────
+                # 1. self._cancelled (set by mark_cancelled() from the
+                #    FastAPI cancel route, paired with proc.kill()) — the
+                #    subprocess is already dead or dying, just exit.
+                # 2. cancel_event (cooperative) — proc is presumed alive,
+                #    ask it to wind down gracefully and drain its terminal
+                #    message before raising.
+                if self._cancelled:
+                    raise GenerationCancelled()
                 if cancel_event and cancel_event.is_set():
-                    self._send({"action": "cancel", "id": req_id})
-                    # Drain until the subprocess acknowledges
-                    while True:
-                        msg = self._recv(timeout=30.0)
-                        if msg.get("type") in ("cancelled", "done", "error"):
-                            raise GenerationCancelled()
+                    # _send may hit a broken pipe if the proc was killed
+                    # underneath us; that's fine, we still know we're
+                    # cancelling.
+                    try:
+                        self._send({"action": "cancel", "id": req_id})
+                    except Exception:
+                        pass
+                    deadline = time.monotonic() + 30.0
+                    while time.monotonic() < deadline:
+                        try:
+                            ack = self._queue.get(timeout=0.5)
+                        except queue.Empty:
+                            continue
+                        # None sentinel = proc died, treat as ack.
+                        if ack is None or ack.get("type") in ("cancelled", "done", "error"):
+                            break
+                    raise GenerationCancelled()
 
-                # Poll queue with short timeout so we can re-check cancel_event
+                # Poll queue with short timeout so we can re-check cancel
+                # signals on every iteration.
                 try:
                     msg = self._queue.get(timeout=0.5)
                 except queue.Empty:
                     continue
 
                 if msg is None:
-                    rc = self._proc.poll() if self._proc else None
-                    # macOS jetsam / Linux OOM-killer use SIGKILL; on Unix
-                    # subprocess returns -9 in that case. Surface a friendly
-                    # hint instead of a bare 'subprocess died' so users on
-                    # Apple Silicon know to lower octree_resolution etc.
+                    # Subprocess pipe closed. Disambiguate three causes:
+                    #   a) FastAPI cancel route killed it → GenerationCancelled
+                    #   b) macOS jetsam / Linux OOM-killer SIGKILL  → friendly hint
+                    #   c) anything else (segfault, unhandled exception) → raw rc
+                    if self._cancelled:
+                        raise GenerationCancelled()
+                    # Capture proc once — cancel_job nulls gen._proc and we
+                    # can't dereference it twice safely without a lock.
+                    proc = self._proc
+                    rc   = proc.poll() if proc else None
                     if rc is not None and rc < 0 and abs(rc) == 9:
                         raise RuntimeError(
                             f"[{self.MODEL_ID}] Backend was killed (signal 9). "

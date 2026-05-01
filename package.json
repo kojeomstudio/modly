@@ -96,13 +96,7 @@
         { "target": "dmg", "arch": ["arm64"] }
       ],
       "icon": "resources/icons/icon.icns",
-      "category": "public.app-category.graphics-design",
-      "hardenedRuntime": true,
-      "gatekeeperAssess": false,
-      "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
-        "NSHumanReadableCopyright": "© Modly contributors",
         "LSMinimumSystemVersion": "12.0.0"
       },
       "extraResources": [

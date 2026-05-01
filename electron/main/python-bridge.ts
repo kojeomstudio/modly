@@ -19,21 +19,29 @@ import { getBuiltinExtensionsDir } from './builtin-sync'
  * with the exact `chown` command to run.
  */
 function ensureWritableDir(dir: string, label: string): string {
-  mkdirSync(dir, { recursive: true })
+  const me  = `${process.getuid?.() ?? '?'}:${process.getgid?.() ?? '?'}`
+  const hint = (code: string): string =>
+    `${label} directory is not writable: ${dir} (${code}).\n` +
+    `If you ever launched Modly with sudo, the directory may be owned ` +
+    `by root. Run:\n` +
+    `  sudo chown -R "$(id -un):$(id -gn)" "${dir}"\n` +
+    `(current process uid:gid = ${me})`
+
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? ''
+    if (code === 'EACCES' || code === 'EPERM') throw new Error(hint(code))
+    throw err
+  }
+
   const probe = join(dir, `.modly-write-probe-${process.pid}`)
   try {
     writeFileSync(probe, '')
     unlinkSync(probe)
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? ''
-    const me = `${process.getuid?.() ?? '?'}:${process.getgid?.() ?? '?'}`
-    throw new Error(
-      `${label} directory is not writable: ${dir} (${code}).\n` +
-      `If you ever launched Modly with sudo, the directory may be owned ` +
-      `by root. Run:\n` +
-      `  sudo chown -R "$(id -un):$(id -gn)" "${dir}"\n` +
-      `(current process uid:gid = ${me})`,
-    )
+    throw new Error(hint(code))
   }
   return dir
 }
