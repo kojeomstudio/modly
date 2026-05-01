@@ -241,6 +241,11 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
               set((s) => ({ runState: { ...s.runState, blockProgress: 100, blockStep: 'Generation complete' } }))
               break
             }
+            if (st.status === 'cancelled') {
+              _activeJobId.current = null
+              set({ runState: IDLE, activeNodeId: null })
+              return
+            }
             if (st.status === 'error') throw new Error(st.error ?? 'Generation failed')
 
             const total   = execNodes.length

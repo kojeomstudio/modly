@@ -96,3 +96,49 @@ jobs:
             --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─── macOS build (Apple Silicon) ─────────────────────────────────────────────
+  build-macos:
+    needs: create-release
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download Python embed (arm64)
+        run: node scripts/download-python-embed.js
+
+      # When APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID + CSC_LINK
+      # secrets are present, electron-builder will sign and notarize
+      # automatically. When they are not, the build still succeeds — it just
+      # emits an unsigned dmg. The README explains the right-click → Open
+      # workaround for unsigned builds.
+      - name: Build & Package (macOS arm64)
+        run: npm run build && npx electron-builder --mac --arm64 --publish never
+        env:
+          APPLE_ID:                       ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD:    ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID:                  ${{ secrets.APPLE_TEAM_ID }}
+          CSC_LINK:                       ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD:               ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY:    ${{ secrets.CSC_LINK && 'true' || 'false' }}
+
+      - name: Upload assets to release
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            dist/*.dmg \
+            dist/*.dmg.blockmap \
+            dist/latest-mac.yml \
+            --repo ${{ github.repository }} \
+            --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

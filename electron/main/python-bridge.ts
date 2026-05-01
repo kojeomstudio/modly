@@ -2,11 +2,41 @@ import { ChildProcess, spawn } from 'child_process'
 import { join } from 'path'
 import { randomBytes } from 'crypto'
 import { app, BrowserWindow } from 'electron'
-import { existsSync, mkdirSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs'
 import axios from 'axios'
 import { getSettings } from './settings-store'
 import { logger } from './logger'
 import { cleanPythonEnv, getVenvPythonExe } from './python-setup'
+import { getBuiltinExtensionsDir } from './builtin-sync'
+
+/**
+ * Ensures `dir` exists and is writable by the current user.
+ *
+ * On macOS we have repeatedly seen userData / workspace / extensions
+ * directories left root-owned after a one-off `sudo` run; subsequent
+ * non-sudo launches then fail with cryptic EACCES deep inside Python.
+ * Probing with a write+unlink up front lets us surface a clear error
+ * with the exact `chown` command to run.
+ */
+function ensureWritableDir(dir: string, label: string): string {
+  mkdirSync(dir, { recursive: true })
+  const probe = join(dir, `.modly-write-probe-${process.pid}`)
+  try {
+    writeFileSync(probe, '')
+    unlinkSync(probe)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? ''
+    const me = `${process.getuid?.() ?? '?'}:${process.getgid?.() ?? '?'}`
+    throw new Error(
+      `${label} directory is not writable: ${dir} (${code}).\n` +
+      `If you ever launched Modly with sudo, the directory may be owned ` +
+      `by root. Run:\n` +
+      `  sudo chown -R "$(id -un):$(id -gn)" "${dir}"\n` +
+      `(current process uid:gid = ${me})`,
+    )
+  }
+  return dir
+}
 
 const API_PORT = 8765
 const API_HOST = '127.0.0.1'
@@ -55,6 +85,10 @@ export class PythonBridge {
       return
     }
 
+    // Verify userData itself is writable before anything else touches it.
+    // sudo-created caches deep under it surface as opaque EACCES later.
+    ensureWritableDir(app.getPath('userData'), 'User data')
+
     const pythonExecutable = this.resolvePythonExecutable()
     const apiDir = this.resolveApiDir()
 
@@ -72,6 +106,9 @@ export class PythonBridge {
         MODELS_DIR:                this.resolveModelsDir(),
         WORKSPACE_DIR:             this.resolveWorkspaceDir(),
         EXTENSIONS_DIR:            this.resolveExtensionsDir(),
+        // Built-ins shipped with the .app live in userData/builtin-extensions
+        // and are scanned by the registry alongside user-installed extensions.
+        BUILTIN_EXTENSIONS_DIR:    getBuiltinExtensionsDir(),
         SELECTED_MODEL_ID:         process.env['SELECTED_MODEL_ID'] ?? '',
         HUGGING_FACE_HUB_TOKEN:    this.resolveHfToken(),
         HF_TOKEN:                  this.resolveHfToken(),
@@ -211,20 +248,17 @@ export class PythonBridge {
 
   private resolveModelsDir(): string {
     const s = getSettings(app.getPath('userData'))
-    mkdirSync(s.modelsDir, { recursive: true })
-    return s.modelsDir
+    return ensureWritableDir(s.modelsDir, 'Models')
   }
 
   private resolveWorkspaceDir(): string {
     const s = getSettings(app.getPath('userData'))
-    mkdirSync(s.workspaceDir, { recursive: true })
-    return s.workspaceDir
+    return ensureWritableDir(s.workspaceDir, 'Workspace')
   }
 
   private resolveExtensionsDir(): string {
     const s = getSettings(app.getPath('userData'))
-    mkdirSync(s.extensionsDir, { recursive: true })
-    return s.extensionsDir
+    return ensureWritableDir(s.extensionsDir, 'Extensions')
   }
 
   private resolveHfToken(): string {

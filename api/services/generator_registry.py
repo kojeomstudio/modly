@@ -17,6 +17,34 @@ from typing import Dict, Optional, Tuple
 from services.generators.base import BaseGenerator
 from services.extension_process import ExtensionProcess, _venv_python
 
+
+# Mapping of sys.platform → manifest platform key. We accept Python's
+# ('win32', 'linux', 'darwin') verbatim; the manifest uses the same.
+_CURRENT_PLATFORM = sys.platform
+
+
+def _is_platform_supported(manifest: dict) -> Tuple[bool, str]:
+    """
+    Checks the manifest's `compatibility.platforms` against the current OS.
+
+    Returns (supported, reason). When unsupported, `reason` is a short
+    user-facing string suitable for the Models page error tooltip.
+    Manifests without a `compatibility` block are treated as supported
+    everywhere (legacy behaviour).
+    """
+    compat = manifest.get("compatibility")
+    if not isinstance(compat, dict):
+        return True, ""
+    platforms = compat.get("platforms")
+    if not platforms:
+        return True, ""
+    if _CURRENT_PLATFORM in platforms:
+        return True, ""
+    return False, (
+        f"Not supported on {_CURRENT_PLATFORM}. "
+        f"Supported platforms: {', '.join(platforms)}."
+    )
+
 # ------------------------------------------------------------------ #
 # Global paths
 # ------------------------------------------------------------------ #
@@ -33,9 +61,17 @@ WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 _extensions_dir_raw = os.environ.get("EXTENSIONS_DIR", "")
 EXTENSIONS_DIR = Path(_extensions_dir_raw) if _extensions_dir_raw else None
 
-print(f"[Registry] MODELS_DIR     = {MODELS_DIR}")
-print(f"[Registry] WORKSPACE_DIR  = {WORKSPACE_DIR}")
-print(f"[Registry] EXTENSIONS_DIR = {EXTENSIONS_DIR or '(not set)'}")
+# Built-in extensions shipped with the .app — synced from app resources
+# to userData/builtin-extensions on launch by syncBuiltinExtensions().
+# Scanned alongside EXTENSIONS_DIR so vendored model adapters work out
+# of the box; user-installed extensions take priority on id conflict.
+_builtin_extensions_dir_raw = os.environ.get("BUILTIN_EXTENSIONS_DIR", "")
+BUILTIN_EXTENSIONS_DIR = Path(_builtin_extensions_dir_raw) if _builtin_extensions_dir_raw else None
+
+print(f"[Registry] MODELS_DIR             = {MODELS_DIR}")
+print(f"[Registry] WORKSPACE_DIR          = {WORKSPACE_DIR}")
+print(f"[Registry] EXTENSIONS_DIR         = {EXTENSIONS_DIR or '(not set)'}")
+print(f"[Registry] BUILTIN_EXTENSIONS_DIR = {BUILTIN_EXTENSIONS_DIR or '(not set)'}")
 
 
 # ------------------------------------------------------------------ #
@@ -44,18 +80,48 @@ print(f"[Registry] EXTENSIONS_DIR = {EXTENSIONS_DIR or '(not set)'}")
 
 def _discover_extensions() -> Dict[str, Tuple[type, dict]]:
     """
-    Scans EXTENSIONS_DIR to find valid extensions.
+    Scans EXTENSIONS_DIR + BUILTIN_EXTENSIONS_DIR to find valid extensions.
     Each extension must have manifest.json + generator.py.
     Returns {full_id: (GeneratorClass, node_manifest, ext_dir)}
     where full_id is "ext_id/node_id".
+
+    User-installed extensions are scanned LAST so they overwrite built-ins
+    on id collision — this lets a power user replace a shipped extension
+    by installing a custom build with the same manifest id.
     """
     result: Dict[str, Tuple[type, dict]] = {}
 
-    if EXTENSIONS_DIR is None or not EXTENSIONS_DIR.exists():
-        print(f"[Registry] WARNING: EXTENSIONS_DIR not set or not found: {EXTENSIONS_DIR}")
+    scan_roots: list[Path] = []
+    if BUILTIN_EXTENSIONS_DIR is not None and BUILTIN_EXTENSIONS_DIR.exists():
+        scan_roots.append(BUILTIN_EXTENSIONS_DIR)
+    if EXTENSIONS_DIR is not None and EXTENSIONS_DIR.exists():
+        scan_roots.append(EXTENSIONS_DIR)
+
+    if not scan_roots:
+        print(
+            f"[Registry] WARNING: no extension dirs found "
+            f"(EXTENSIONS_DIR={EXTENSIONS_DIR}, "
+            f"BUILTIN_EXTENSIONS_DIR={BUILTIN_EXTENSIONS_DIR})"
+        )
         return result
 
-    for ext_dir in sorted(EXTENSIONS_DIR.iterdir()):
+    for scan_root in scan_roots:
+        _scan_extensions_root(scan_root, result)
+
+    return result
+
+
+def _scan_extensions_root(
+    scan_root: Path, result: Dict[str, Tuple[type, dict]]
+) -> None:
+    """Discovers extensions in a single directory, mutating `result`.
+
+    Split out from _discover_extensions so we can scan both the built-in
+    and user-installed roots without nested-loop indentation gymnastics.
+    Later calls overwrite earlier ones on id collision (built-ins are
+    scanned first, so user-installed extensions win).
+    """
+    for ext_dir in sorted(scan_root.iterdir()):
         if not ext_dir.is_dir():
             continue
 
@@ -133,8 +199,6 @@ def _discover_extensions() -> Dict[str, Tuple[type, dict]]:
         except Exception as exc:
             print(f"[Registry] ERROR loading extension '{ext_dir.name}': {exc}")
 
-    return result
-
 
 # ------------------------------------------------------------------ #
 # GeneratorRegistry
@@ -154,6 +218,12 @@ class GeneratorRegistry:
         for model_id, entry in extensions.items():
             cls, manifest, ext_dir = entry
             try:
+                supported, reason = _is_platform_supported(manifest)
+                if not supported:
+                    self._errors[model_id] = reason
+                    self._manifests[model_id] = manifest
+                    print(f"[Registry] Skipping '{model_id}': {reason}")
+                    continue
                 if cls is None:
                     # Subprocess mode: venv must exist
                     if not _venv_python(ext_dir).exists():

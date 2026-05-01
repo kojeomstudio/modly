@@ -52,6 +52,10 @@ class ExtensionProcess:
         # responses — manifesting as 'Unexpected response to load: {ready…}'.
         self._request_lock: threading.Lock = threading.Lock()
         self._loaded: bool                       = False
+        # Set when the parent intentionally killed this subprocess (cancel
+        # path). Suppresses post-kill stderr drain output that would
+        # otherwise look like the process is still running.
+        self._cancelled: bool = False
 
         # Mirrors BaseGenerator attributes used by the registry
         self.hf_repo          = manifest.get("hf_repo", "")
@@ -134,8 +138,17 @@ class ExtensionProcess:
             self._queue.put(None)  # sentinel: process is done
 
     def _stderr_loop(self) -> None:
-        """Forwards subprocess stderr to the main process stderr."""
+        """Forwards subprocess stderr to the main process stderr.
+
+        Once the subprocess has been intentionally killed (cancel path),
+        we still drain the pipe to EOF so the kernel can free it, but
+        drop the lines instead of printing them — otherwise tqdm output
+        already buffered before the kill keeps streaming for seconds and
+        the user sees a 'log keeps running after cancel' phantom.
+        """
         for line in self._proc.stderr:
+            if self._cancelled:
+                continue
             print(f"[{self.MODEL_ID}] {line}", end="", file=sys.stderr)
 
     def _send(self, msg: dict) -> None:
@@ -164,7 +177,18 @@ class ExtensionProcess:
             except queue.Empty:
                 pass
             self._loaded = False
+            self._cancelled = False
             self._start()
+
+    def mark_cancelled(self) -> None:
+        """Signal the cancel path: silence post-kill stderr drain.
+
+        Called by the cancel route just before _proc.kill(). The stderr
+        forwarder reads the flag inside its drain loop and drops further
+        lines so users don't see seconds of buffered tqdm output after
+        pressing Cancel.
+        """
+        self._cancelled = True
 
     # ------------------------------------------------------------------ #
     # BaseGenerator-compatible interface
@@ -242,7 +266,22 @@ class ExtensionProcess:
                     continue
 
                 if msg is None:
-                    raise RuntimeError(f"[{self.MODEL_ID}] Subprocess died during generation")
+                    rc = self._proc.poll() if self._proc else None
+                    # macOS jetsam / Linux OOM-killer use SIGKILL; on Unix
+                    # subprocess returns -9 in that case. Surface a friendly
+                    # hint instead of a bare 'subprocess died' so users on
+                    # Apple Silicon know to lower octree_resolution etc.
+                    if rc is not None and rc < 0 and abs(rc) == 9:
+                        raise RuntimeError(
+                            f"[{self.MODEL_ID}] Backend was killed (signal 9). "
+                            "Most often this is the OS reclaiming memory under "
+                            "pressure. Try a lower octree_resolution, fewer "
+                            "inference steps, or close other apps."
+                        )
+                    raise RuntimeError(
+                        f"[{self.MODEL_ID}] Subprocess died during generation "
+                        f"(returncode={rc})"
+                    )
 
                 t = msg.get("type")
 

@@ -2,13 +2,64 @@
 BaseGenerator — contract that each model adapter must implement.
 """
 from abc import ABC, abstractmethod
+import os
+import sys
 import threading
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 
 class GenerationCancelled(Exception):
     """Raised by generators when a cancel_event is set mid-generation."""
+
+
+def pick_device() -> Tuple[str, "object"]:
+    """
+    Selects the best available torch device and a sensible default dtype.
+
+    Returns (device_str, torch_dtype). Order of preference:
+        1. CUDA — fp16 (broad op coverage, big speedup)
+        2. MPS  — fp32 (Apple Silicon Metal; fp16 has frequent op-level
+                  fallbacks that silently move tensors to CPU and end up
+                  slower than staying in fp32)
+        3. CPU  — fp32
+
+    Side effect on MPS: sets PYTORCH_ENABLE_MPS_FALLBACK=1 unless the
+    caller pinned it explicitly. Without this, any unsupported op (e.g.
+    aten::col2im for some volume decoders) raises RuntimeError mid-run.
+    Falling back to CPU for those ops is slow but the alternative is a
+    crash partway through generation.
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda", torch.float16
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        return "mps", torch.float32
+    return "cpu", torch.float32
+
+
+def release_device_memory(device: Optional[str] = None) -> None:
+    """
+    Releases cached GPU memory for the active device. No-op on CPU.
+
+    Accepts an explicit device string (passed by callers that already
+    know what they were running on) or auto-detects via pick_device()
+    when called without args from cleanup paths.
+    """
+    try:
+        import torch
+    except ImportError:
+        return
+    dev = device or pick_device()[0]
+    if dev == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif dev == "mps" and getattr(torch, "mps", None) is not None:
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
 
 
 def smooth_progress(
@@ -100,16 +151,10 @@ class BaseGenerator(ABC):
         self._model = None
         import gc
         gc.collect()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
+        release_device_memory()
         # Force the OS to reclaim unused memory from this process
         try:
             import ctypes
-            import sys
             if sys.platform == "win32":
                 kernel32 = ctypes.windll.kernel32
                 kernel32.SetProcessWorkingSetSizeEx(

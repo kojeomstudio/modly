@@ -72,6 +72,41 @@ for sub in models workspace extensions workflows dependencies; do
   rm -f "${probe}"
 done
 
+# ---- 2b. Sync vendored submodule extensions → datas/extensions ----
+# The runtime reads from datas/extensions/{ext_id}, NOT from extensions/.
+# Without this step a `git pull` of submodule fixes wouldn't show up in dev
+# until you manually copied the files. We treat extensions/ as the source
+# of truth on disk and re-mirror generator.py + manifest.json + setup.py
+# into datas every launch. We do NOT touch installed venvs (datas/.../venv)
+# — those are user-built and reused across runs.
+EXT_SOURCE_DIR="${PROJECT_ROOT}/extensions"
+if [[ -d "${EXT_SOURCE_DIR}" ]]; then
+  for src in "${EXT_SOURCE_DIR}"/*/; do
+    [[ -d "${src}" ]] || continue
+    [[ -f "${src}manifest.json" ]] || continue
+    # Read the manifest's `id` field via Python so we don't depend on jq.
+    ext_id="$(
+      "$PYTHON_BIN" -c "import json,sys;print(json.load(open(sys.argv[1]))['id'])" \
+        "${src}manifest.json" 2>/dev/null || true
+    )"
+    [[ -n "${ext_id}" ]] || { log "skip ${src} — manifest has no id"; continue; }
+    dst="${DATAS_DIR}/extensions/${ext_id}"
+    mkdir -p "${dst}"
+    # Copy code/manifest/setup but never overwrite an existing venv.
+    for f in manifest.json generator.py setup.py build_vendor.py README.md; do
+      if [[ -f "${src}${f}" ]]; then
+        cp -f "${src}${f}" "${dst}/${f}"
+      fi
+    done
+    # Copy any vendor/ directory so build_vendor.py output ships too.
+    if [[ -d "${src}vendor" ]]; then
+      rm -rf "${dst}/vendor"
+      cp -R "${src}vendor" "${dst}/vendor"
+    fi
+  done
+  log "Submodule extensions synced → datas/extensions/"
+fi
+
 # ---- 3. JS deps ----
 if [[ ! -d "${PROJECT_ROOT}/node_modules" ]]; then
   log "Installing npm dependencies…"

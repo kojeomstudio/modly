@@ -97,7 +97,17 @@ async def cancel_job(job_id: str):
     try:
         gen = generator_registry._generators.get(generator_registry._active_id)
         if gen is not None and hasattr(gen, "_proc") and gen._proc and gen._proc.poll() is None:
-            gen._proc.kill()
+            # Silence the stderr forwarder before SIGKILL so the user
+            # doesn't see seconds of buffered tqdm output draining after
+            # they pressed cancel.
+            if hasattr(gen, "mark_cancelled"):
+                gen.mark_cancelled()
+            proc = gen._proc
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
             gen._loaded = False
             gen._proc = None
     except Exception:

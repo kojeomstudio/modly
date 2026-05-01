@@ -5,6 +5,10 @@
     "https://github.com/lightningpixel/modly-hunyuan3d-mini-turbo-extension",
     "https://github.com/lightningpixel/modly-hunyuan3d-mini-fast-extension",
     "https://github.com/lightningpixel/modly-triposg-extension",
-    "https://github.com/lightningpixel/modly-trellis2-gguf-extension"
+    "https://github.com/lightningpixel/modly-trellis2-gguf-extension",
+    "https://github.com/kojeomstudio/modly-hunyuan3d-mini-extension",
+    "https://github.com/kojeomstudio/modly-hunyuan3d-mini-turbo-extension",
+    "https://github.com/kojeomstudio/modly-trellis2-extension",
+    "https://github.com/kojeomstudio/modly-trellis2-gguf-extension"
   ]
 }
