@@ -18,11 +18,20 @@ export function useApi() {
     const blob = new Blob([byteArray], { type: 'image/png' })
     const filename = imagePath.split(/[\\/]/).pop() ?? 'image.png'
 
+    // Texture baking depends on CUDA-only C++ extensions and is hard-rejected
+    // by the API on macOS. The UI toggle is disabled there, but a previously-
+    // persisted `enableTexture: true` from the zustand store (or from another
+    // platform) would still be sent and bounce off the API guard with HTTP 400.
+    // Defensive fallback: force false on darwin no matter the stored value.
+    const enableTexture = window.electron.platform === 'darwin'
+      ? false
+      : options.enableTexture
+
     const formData = new FormData()
     formData.append('image', blob, filename)
     formData.append('model_id', options.modelId)
     formData.append('remesh', options.remesh)
-    formData.append('enable_texture', String(options.enableTexture))
+    formData.append('enable_texture', String(enableTexture))
     formData.append('texture_resolution', String(options.textureResolution))
     formData.append('params', JSON.stringify(options.modelParams))
     const { data } = await client.post<{ job_id: string }>('/generate/from-image', formData, {

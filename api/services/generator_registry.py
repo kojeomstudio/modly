@@ -143,13 +143,23 @@ def _scan_extensions_root(
             nodes = [n for n in manifest.get("nodes", []) if n.get("id")]
 
             # --- Subprocess mode (new): venv present → use ExtensionProcess ---
-            # Also force subprocess mode for extensions that ship a build_vendor.py
-            # but whose vendor/ directory hasn't been built yet: this surfaces a
-            # loadError in the UI (Repair button) so the user can run setup.py.
+            # Also force subprocess mode for extensions that ship a setup.py
+            # OR a build_vendor.py: those are sandboxed by convention. Trying
+            # direct-mode on a freshly-bundled built-in (no venv yet) would
+            # import generator.py into the FastAPI parent process, which
+            # doesn't have the extension's deps (PIL, torch, hy3dgen, …) and
+            # raises "No module named 'PIL'" before the user can even click
+            # Repair. Treating these as "needs setup" surfaces the actionable
+            # state cleanly.
             has_venv         = _venv_python(ext_dir).exists()
+            has_setup_py     = (ext_dir / "setup.py").exists()
             has_build_vendor = (ext_dir / "build_vendor.py").exists()
             vendor_built     = (ext_dir / "vendor").exists()
-            subprocess_mode  = has_venv or (has_build_vendor and not vendor_built)
+            subprocess_mode  = (
+                has_venv
+                or has_setup_py
+                or (has_build_vendor and not vendor_built)
+            )
 
             cls_or_None = None
             if not subprocess_mode:

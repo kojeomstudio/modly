@@ -195,6 +195,15 @@ export const useAppStore = create<AppState>()(
       initApp: async () => {
         set({ backendStatus: 'starting', backendError: null })
 
+        // Texture generation isn't supported on macOS (custom_rasterizer is
+        // CUDA-only). Wipe a stale persisted enableTexture=true so the
+        // toggle's disabled UI matches the actual value the API sees.
+        if (window.electron.platform === 'darwin' && get().generationOptions.enableTexture) {
+          set({
+            generationOptions: { ...get().generationOptions, enableTexture: false },
+          })
+        }
+
         window.electron.python.offCrashed()
         window.electron.python.onCrashed(({ code }) => {
           const msg = `FastAPI process crashed unexpectedly (exit code: ${code ?? 'unknown'})`
