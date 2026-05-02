@@ -420,13 +420,24 @@ export default function GenerationOptions(): JSX.Element {
       </div>
 
       {/* Texture */}
+      {(() => {
+        // Texture baking depends on CUDA-only C++ extensions (custom_rasterizer,
+        // differentiable_renderer, texture_baker). Fail loudly on macOS instead
+        // of letting the user enable a switch we'll have to reject server-side.
+        const textureBlocked = window.electron.platform === 'darwin'
+        const textureTooltip = textureBlocked
+          ? 'Texture generation requires CUDA and is not supported on macOS.'
+          : 'Bake UV-mapped textures onto the mesh. Requires uv_unwrapper and texture_baker to be compiled.'
+        return (
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center w-full">
-          <span className="text-sm text-zinc-300">Generate Texture</span>
+          <span className={`text-sm ${textureBlocked ? 'text-zinc-500' : 'text-zinc-300'}`}>Generate Texture</span>
           <button
             role="checkbox"
-            aria-checked={generationOptions.enableTexture}
+            disabled={textureBlocked}
+            aria-checked={generationOptions.enableTexture && !textureBlocked}
             onClick={() => {
+              if (textureBlocked) return
               if (!generationOptions.enableTexture) {
                 setShowTextureWarning(true)
               } else {
@@ -434,15 +445,17 @@ export default function GenerationOptions(): JSX.Element {
               }
             }}
             className={`ml-2 w-9 h-5 rounded-full transition-colors relative flex-shrink-0 ${
-              generationOptions.enableTexture ? 'bg-accent' : 'bg-zinc-700'
+              textureBlocked
+                ? 'bg-zinc-800 cursor-not-allowed opacity-60'
+                : generationOptions.enableTexture ? 'bg-accent' : 'bg-zinc-700'
             }`}
           >
             <span className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-all ${
-              generationOptions.enableTexture ? 'left-[18px]' : 'left-0.5'
+              generationOptions.enableTexture && !textureBlocked ? 'left-[18px]' : 'left-0.5'
             }`} />
           </button>
           <span className="ml-auto">
-            <Tooltip content="Bake UV-mapped textures onto the mesh. Requires uv_unwrapper and texture_baker to be compiled.">
+            <Tooltip content={textureTooltip}>
               <span className="w-5 h-5 rounded-full flex items-center justify-center text-zinc-600 hover:text-accent-light transition-colors cursor-default select-none">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="12" cy="12" r="10" />
@@ -454,7 +467,7 @@ export default function GenerationOptions(): JSX.Element {
           </span>
         </div>
 
-        <div className={`flex flex-col gap-1 transition-opacity ${generationOptions.enableTexture ? '' : 'opacity-40'}`}>
+        <div className={`flex flex-col gap-1 transition-opacity ${generationOptions.enableTexture && !textureBlocked ? '' : 'opacity-40'}`}>
             <FieldLabel
               label="Texture Resolution"
               tooltip="Width and height of the baked texture in pixels. Higher values give more detail but take longer. Must be between 64 and 2048."
@@ -466,7 +479,7 @@ export default function GenerationOptions(): JSX.Element {
                 max={2048}
                 step={64}
                 value={textureResolutionRaw}
-                disabled={!generationOptions.enableTexture}
+                disabled={!generationOptions.enableTexture || textureBlocked}
                 onChange={(e) => setTextureResolutionRaw(e.target.value)}
                 onBlur={() => {
                   const v = parseInt(textureResolutionRaw)
@@ -479,7 +492,14 @@ export default function GenerationOptions(): JSX.Element {
               <span className="text-xs text-zinc-600 flex-shrink-0">px</span>
             </div>
           </div>
+        {textureBlocked && (
+          <p className="text-[11px] text-zinc-500 leading-snug">
+            Texture generation is not supported on macOS — disabled.
+          </p>
+        )}
       </div>
+        )
+      })()}
 
     </div>
 

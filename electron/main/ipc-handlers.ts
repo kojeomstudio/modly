@@ -564,6 +564,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       download_check?:   string
       hf_skip_prefixes?: string[]
     }[]
+    compatibility?: {
+      platforms?: ('win32' | 'linux' | 'darwin')[]
+      requires_cuda?: boolean
+      features?: Record<string, { platforms?: ('win32' | 'linux' | 'darwin')[] }>
+    }
   }
 
   function parseExtensionManifest(parsed: ParsedManifest, fallbackId: string, trustedRepos: Set<string>, builtin = false) {
@@ -577,6 +582,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       source:       parsed.source,
       installedRef: parsed.installed_ref,
       builtin,
+      // Surface manifest compatibility so the renderer can disable
+      // platform-incompatible toggles (e.g. texture on macOS) without a
+      // round-trip per render.
+      compatibility: parsed.compatibility,
     }
 
     const nodes = (parsed.nodes ?? []).map(n => ({
@@ -717,6 +726,17 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
       if (!manifest.id) throw new Error('manifest.json: required field "id" missing')
       if (!manifest.nodes?.length) throw new Error('manifest.json: required field "nodes" missing or empty')
+
+      // Reject unsupported platforms up front. setup.py would fail anyway,
+      // but the failure messages from CUDA-only wheels are confusing on
+      // macOS — better to refuse at the install step.
+      const compatPlats = manifest.compatibility?.platforms
+      if (compatPlats && !compatPlats.includes(process.platform as 'darwin' | 'linux' | 'win32')) {
+        throw new Error(
+          `Extension "${manifest.id}" is not supported on ${process.platform}. ` +
+          `Supported: ${compatPlats.join(', ')}.`,
+        )
+      }
 
       const isProcess = manifest.type === 'process'
       const entryFile = manifest.entry ?? 'processor.js'
@@ -868,13 +888,35 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
-  // Re-run setup.py for a model extension (creates the venv if missing)
+  // Re-run setup.py for a model extension (creates the venv if missing).
+  //
+  // Lookup order: user-installed extensions/<id>, then bundled
+  // builtin-extensions/<id>. When only a built-in is present we PROMOTE
+  // it (copy to the user dir) before running setup, so the resulting
+  // venv survives the next-launch wipe-and-resync of builtin-extensions.
   ipcMain.handle('extensions:repair', async (_, extensionId: string) => {
     try {
-      const extDir = join(getSettings(app.getPath('userData')).extensionsDir, extensionId)
-      if (!existsSync(join(extDir, 'setup.py'))) {
+      const userData      = app.getPath('userData')
+      const extensionsDir = getSettings(userData).extensionsDir
+      const userExtDir    = join(extensionsDir, extensionId)
+      const builtinExtDir = join(getBuiltinExtensionsDir(), extensionId)
+
+      let extDir: string
+      if (existsSync(join(userExtDir, 'setup.py'))) {
+        extDir = userExtDir
+      } else if (existsSync(join(builtinExtDir, 'setup.py'))) {
+        // Promote built-in template into the user-writable extensions dir.
+        // Built-ins ship without a venv; the venv we'll build below would
+        // be lost on next launch when syncBuiltinExtensions wipes the
+        // resource-mirrored directory.
+        await mkdir(extensionsDir, { recursive: true })
+        await cp(builtinExtDir, userExtDir, { recursive: true })
+        extDir = userExtDir
+        logger.info(`[ext-repair] promoted built-in '${extensionId}' to ${userExtDir}`)
+      } else {
         return { success: false, error: 'No setup.py found for this extension' }
       }
+
       const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
       await runExtensionSetup(extDir, gpuSm, cudaVersion, (line) => logger.info(`[ext-repair] ${line}`))
       try {

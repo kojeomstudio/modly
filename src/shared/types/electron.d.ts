@@ -105,6 +105,7 @@ export interface Workflow {
 declare global {
   interface Window {
     electron: {
+      platform: 'darwin' | 'linux' | 'win32'
       shell: {
         openExternal: (url: string) => Promise<void>
       }

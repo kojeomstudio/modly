@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 import threading
 import traceback
 import uuid
@@ -45,6 +46,23 @@ async def generate_from_image(
         generator_registry.get_generator(model_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+    # Per-feature platform compatibility check. The manifest may declare
+    # something like:
+    #   "compatibility": { "features": { "texture": { "platforms": [...] } } }
+    # We refuse the request up front instead of letting it bubble as a
+    # cryptic RuntimeError from the generator subprocess.
+    if enable_texture:
+        manifest = generator_registry.get_manifest(model_id)
+        compat   = manifest.get("compatibility", {}) or {}
+        feats    = (compat.get("features") or {}).get("texture") or {}
+        plats    = feats.get("platforms")
+        if plats and sys.platform not in plats:
+            raise HTTPException(
+                400,
+                f"Texture generation is not supported on {sys.platform} "
+                f"for model '{model_id}'. Disable the Texture toggle.",
+            )
 
     generator_registry.switch_model(model_id)
 
@@ -92,8 +110,13 @@ async def cancel_job(job_id: str):
     if job.status in ("pending", "running"):
         job.status = "cancelled"
     # Kill the active generator subprocess immediately so inference stops now.
-    # _run_generation will catch the resulting exception, see job_id in _cancelled,
-    # and return cleanly without setting an error status.
+    # _run_generation will catch the resulting exception, see job_id in
+    # _cancelled, and return cleanly without setting an error status.
+    #
+    # We deliberately do NOT null-out gen._proc / gen._loaded here. The
+    # generate() loop on another thread may still be reading those fields,
+    # and the next generate request will go through _ensure_started which
+    # detects a dead proc via poll() and restarts cleanly.
     try:
         gen = generator_registry._generators.get(generator_registry._active_id)
         if gen is not None and hasattr(gen, "_proc") and gen._proc and gen._proc.poll() is None:
@@ -108,8 +131,6 @@ async def cancel_job(job_id: str):
                 proc.wait(timeout=5)
             except Exception:
                 pass
-            gen._loaded = False
-            gen._proc = None
     except Exception:
         pass
     return {"cancelled": True}

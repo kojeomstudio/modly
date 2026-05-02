@@ -56,6 +56,12 @@ def release_device_memory(device: Optional[str] = None) -> None:
     if dev == "cuda" and torch.cuda.is_available():
         torch.cuda.empty_cache()
     elif dev == "mps" and getattr(torch, "mps", None) is not None:
+        # synchronize() forces in-flight async ops to complete; without it
+        # empty_cache() can't reclaim memory still tied to pending work.
+        try:
+            torch.mps.synchronize()
+        except Exception:
+            pass
         try:
             torch.mps.empty_cache()
         except Exception:

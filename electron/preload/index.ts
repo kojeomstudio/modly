@@ -2,6 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 // Expose a typed API to the renderer process via window.electron
 contextBridge.exposeInMainWorld('electron', {
+  // Read once at preload time. Used by the UI to gate platform-specific
+  // toggles (e.g. CUDA-only texture generation on macOS).
+  platform: process.platform as 'darwin' | 'linux' | 'win32',
+
   // Window controls
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),

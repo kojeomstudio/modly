@@ -154,8 +154,17 @@ class ExtensionProcess:
 
     def _send(self, msg: dict) -> None:
         with self._send_lock:
-            self._proc.stdin.write(json.dumps(msg) + "\n")
-            self._proc.stdin.flush()
+            # Capture once — cancel_job() may null self._proc concurrently.
+            # Without this guard, the cancel-event drain branch in
+            # generate() can hit AttributeError when writing 'cancel' to a
+            # subprocess that the parent is tearing down.
+            proc = self._proc
+            if proc is None or proc.stdin is None or proc.stdin.closed:
+                raise BrokenPipeError(
+                    f"[{self.MODEL_ID}] subprocess stdin is closed"
+                )
+            proc.stdin.write(json.dumps(msg) + "\n")
+            proc.stdin.flush()
 
     def _recv(self, timeout: float | None = 120.0) -> dict:
         try:
