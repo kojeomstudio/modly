@@ -121,6 +121,17 @@ export class PythonBridge {
         HUGGING_FACE_HUB_TOKEN:    this.resolveHfToken(),
         HF_TOKEN:                  this.resolveHfToken(),
         MODLY_API_TOKEN:           this.apiToken,
+        // Force the legacy LFS download path. HuggingFace's experimental
+        // Xet (Content-Addressed Storage) protocol is being rolled out for
+        // some repos but the macOS hf_xet 1.0.x client has hit two real
+        // problems for our users: (a) it logs to ~/.cache/huggingface/xet
+        // which is often left root-owned by an old sudo run and (b) it
+        // returns 416 Range Not Satisfiable from cas-server.xethub.hf.co
+        // when its on-disk state diverges from the server side. Disabling
+        // it falls back to plain HTTPS chunked downloads — slower in
+        // theory, but reliable. Override at launch time if you want to
+        // re-enable it for a specific debug session.
+        HF_HUB_DISABLE_XET:        process.env['HF_HUB_DISABLE_XET'] ?? '1',
       }
     })
 

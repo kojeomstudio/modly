@@ -297,6 +297,32 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('model:download', async (event, { repoId, modelId, skipPrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[] }) => {
+    // Refuse downloads for extensions whose manifest declares them
+    // incompatible with the current platform. The download itself would
+    // succeed (it's just file transfer) but inference can't run, so the
+    // user only ends up with disk usage and no working model. modelId is
+    // either "<ext_id>" or "<ext_id>/<node_id>" — strip to ext_id.
+    try {
+      const extId = modelId.split('/')[0]
+      const userExt    = join(getSettings(app.getPath('userData')).extensionsDir, extId, 'manifest.json')
+      const builtinExt = join(getBuiltinExtensionsDir(), extId, 'manifest.json')
+      const manifestPath = existsSync(userExt) ? userExt : (existsSync(builtinExt) ? builtinExt : null)
+      if (manifestPath) {
+        const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as ParsedManifest
+        const plats    = manifest.compatibility?.platforms
+        if (plats && !plats.includes(process.platform as 'darwin' | 'linux' | 'win32')) {
+          return {
+            success: false,
+            error:
+              `'${manifest.name ?? extId}' is not supported on ${process.platform}. ` +
+              `Supported: ${plats.join(', ')}.`,
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(`[model:download] compatibility check failed for ${modelId}: ${err}`)
+    }
+
     try {
       await downloadModelFromHF(repoId, modelId, (progress) => {
         event.sender.send('model:downloadProgress', { modelId, ...progress })
