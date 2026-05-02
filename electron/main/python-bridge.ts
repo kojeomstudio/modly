@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from 'child_process'
+import { homedir } from 'os'
 import { join } from 'path'
 import { randomBytes } from 'crypto'
 import { app, BrowserWindow } from 'electron'
@@ -18,6 +19,51 @@ import { getBuiltinExtensionsDir } from './builtin-sync'
  * Probing with a write+unlink up front lets us surface a clear error
  * with the exact `chown` command to run.
  */
+/**
+ * Non-fatal probe of ~/.cache/huggingface for write permission.
+ *
+ * huggingface_hub writes commit-hash refs and chunk-cache state into
+ * this tree on every download. If a previous sudo run left subpaths
+ * root-owned, downloads still proceed (the library logs "Ignored error
+ * while writing commit hash" and continues) but the noise is confusing
+ * and xet's permission failures cascade into 416 Range Not Satisfiable
+ * from the CAS server. Detect the bad state up front and surface the
+ * chown command instead of letting it slowly degrade later runs.
+ *
+ * We probe the top-level dir plus the two subdirs that hold the active
+ * caches; either alone may be writable while the other isn't.
+ */
+function warnIfHfCacheUnwritable(): void {
+  const hfDir = join(homedir(), '.cache', 'huggingface')
+  if (!existsSync(hfDir)) return  // No cache yet — first download will create it
+
+  const candidates = [hfDir, join(hfDir, 'hub'), join(hfDir, 'xet')]
+  const failures: string[] = []
+  for (const dir of candidates) {
+    if (!existsSync(dir)) continue
+    const probe = join(dir, `.modly-probe-${process.pid}`)
+    try {
+      writeFileSync(probe, '')
+      unlinkSync(probe)
+    } catch {
+      failures.push(dir)
+    }
+  }
+
+  if (failures.length === 0) return
+  const me = `${process.getuid?.() ?? '?'}:${process.getgid?.() ?? '?'}`
+  logger.warn(
+    `[python-bridge] HuggingFace cache is not writable in ${failures.length} ` +
+    `path(s): ${failures.join(', ')}. Model downloads still work but you'll see ` +
+    `"Ignored error while writing commit hash" or xet 416 errors in logs.\n` +
+    `Fix with:\n` +
+    `  sudo chown -R "$(id -un):$(id -gn)" "${hfDir}"\n` +
+    `  rm -rf "${join(hfDir, 'xet')}"\n` +
+    `(current uid:gid = ${me})`,
+  )
+}
+
+
 function ensureWritableDir(dir: string, label: string): string {
   const me  = `${process.getuid?.() ?? '?'}:${process.getgid?.() ?? '?'}`
   const hint = (code: string): string =>
@@ -96,6 +142,12 @@ export class PythonBridge {
     // Verify userData itself is writable before anything else touches it.
     // sudo-created caches deep under it surface as opaque EACCES later.
     ensureWritableDir(app.getPath('userData'), 'User data')
+
+    // The HF cache lives in $HOME and is shared across all model
+    // downloads. A read-only state there doesn't block startup but
+    // makes every download log noisy, so warn now while we have a
+    // clean stdout to print into.
+    warnIfHfCacheUnwritable()
 
     const pythonExecutable = this.resolvePythonExecutable()
     const apiDir = this.resolveApiDir()
