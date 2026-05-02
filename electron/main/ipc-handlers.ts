@@ -300,7 +300,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     try {
       await downloadModelFromHF(repoId, modelId, (progress) => {
         event.sender.send('model:downloadProgress', { modelId, ...progress })
-      }, skipPrefixes)
+      }, skipPrefixes, pythonBridge.getApiToken())
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }

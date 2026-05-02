@@ -6,6 +6,7 @@ import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { getSettings } from './settings-store'
 import { app } from 'electron'
+import { API_TOKEN_HEADER } from './python-bridge'
 
 export interface DownloadProgress {
   percent: number
@@ -106,12 +107,18 @@ export function listDownloadedModels(modelsDir: string): { id: string; name: str
 /**
  * Download a model from HuggingFace Hub via the Python FastAPI SSE endpoint.
  * Reports progress (0–100) via the onProgress callback.
+ *
+ * `apiToken` is the per-launch FastAPI token. The SSE endpoint is behind
+ * the loopback auth middleware, and Electron's net.fetch bypasses
+ * axios.defaults — so callers must pass it explicitly. Without this the
+ * request comes back as 401 Unauthorized.
  */
 export async function downloadModelFromHF(
   repoId:        string,
   modelId:       string,
   onProgress:    ProgressCallback,
   skipPrefixes?: string[],
+  apiToken?:     string,
 ): Promise<void> {
   const { net } = require('electron')
   let url = `${PYTHON_API_URL}/model/hf-download?repo_id=${encodeURIComponent(repoId)}&model_id=${encodeURIComponent(modelId)}`
@@ -123,7 +130,10 @@ export async function downloadModelFromHF(
     url += `&token=${encodeURIComponent(hfToken)}`
   }
 
-  const res = await net.fetch(url)
+  const headers: Record<string, string> = {}
+  if (apiToken) headers[API_TOKEN_HEADER] = apiToken
+
+  const res = await net.fetch(url, { headers })
   if (!res.ok) throw new Error(`HuggingFace download failed: HTTP ${res.status}`)
   if (!res.body) throw new Error('No response body from HF download stream')
 
