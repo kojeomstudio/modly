@@ -158,12 +158,23 @@ def main() -> None:
 
                 try:
                     output_path = gen.generate(image_bytes, params, progress_cb, cancel_evt)
+                    print(
+                        f"[runner] generate returned {output_path!s} — "
+                        f"sending done message to parent",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     send({"type": "done", "id": rid, "output_path": str(output_path)})
                 except Exception as exc:
                     # Detect GenerationCancelled by name to avoid import issues
                     if type(exc).__name__ == "GenerationCancelled":
                         send({"type": "cancelled", "id": rid})
                     else:
+                        print(
+                            f"[runner] generate raised {type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                         send({"type": "error", "id": rid,
                               "message": str(exc),
                               "traceback": traceback.format_exc()})
