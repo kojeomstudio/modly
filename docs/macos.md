@@ -24,6 +24,25 @@ sudo chown -R "$(id -un):$(id -gn)" datas
 sudo chown -R "$(id -un):$(id -gn)" ~/Library/Application\ Support/Modly
 ```
 
+The HuggingFace cache lives in `~/.cache/huggingface` and is shared
+across all model downloads. The same sudo-leftover pattern there
+shows up at startup as:
+
+```
+[python-bridge] HuggingFace cache is not writable in N path(s): …
+```
+
+Fix it the same way:
+
+```
+sudo chown -R "$(id -un):$(id -gn)" ~/.cache/huggingface
+rm -rf ~/.cache/huggingface/xet     # stale Xet protocol state
+```
+
+The warning is non-fatal — downloads still complete via the
+huggingface_hub fallback path — but ignoring it leaves "Ignored error
+while writing commit hash" lines in every log.
+
 ## Compute device
 
 The runner auto-selects MPS (Apple Silicon Metal) when available, falling

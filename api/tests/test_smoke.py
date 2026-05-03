@@ -99,3 +99,67 @@ def test_platform_filter_blocks_when_unsupported(monkeypatch: pytest.MonkeyPatch
 
     ok, _ = _is_platform_supported({})  # legacy manifest
     assert ok is True
+
+
+def _write_stub_extension(dir: Path, ext_id: str, version: str, has_setup: bool = True) -> None:
+    """Drop a minimal manifest+generator.py pair into `dir` for scan tests."""
+    dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "id":              ext_id,
+        "name":            f"Stub {ext_id}",
+        "type":            "model",
+        "version":         version,
+        "generator_class": "StubGen",
+        "nodes":           [{"id": "default"}],
+    }
+    (dir / "manifest.json").write_text(json.dumps(manifest))
+    (dir / "generator.py").write_text("# stub")
+    if has_setup:
+        (dir / "setup.py").write_text("# stub")
+
+
+def test_scan_extensions_root_user_dir_overrides_builtin(tmp_path: Path) -> None:
+    """Scanning builtin first then user must let the user-dir entry win.
+
+    Built-ins ship as a read-only template; users who install (or
+    promote-and-modify) an extension with the same id must not be
+    silently shadowed.
+    """
+    from services.generator_registry import _scan_extensions_root
+
+    builtin = tmp_path / "builtin"
+    user    = tmp_path / "user"
+    _write_stub_extension(builtin / "shared", "shared", "1.0.0-builtin")
+    _write_stub_extension(user / "shared",    "shared", "2.0.0-user")
+
+    result: dict = {}
+    _scan_extensions_root(builtin, result)
+    _scan_extensions_root(user, result)
+
+    assert "shared/default" in result
+    _cls, manifest, ext_dir = result["shared/default"]
+    assert manifest["version"] == "2.0.0-user"
+    assert ext_dir == user / "shared"
+
+
+def test_scan_extensions_root_setup_py_forces_subprocess_mode(tmp_path: Path) -> None:
+    """Extensions that ship a setup.py must NOT be loaded in legacy direct
+    mode even when no venv exists yet.
+
+    Direct mode imports generator.py into the FastAPI parent process.
+    Bundled built-ins (no venv) used to fall through to that path and
+    raise 'No module named PIL' before the user could click Repair.
+    The fix forces subprocess_mode=True whenever setup.py is present.
+    """
+    from services.generator_registry import _scan_extensions_root
+
+    ext_root = tmp_path / "ext_root"
+    _write_stub_extension(ext_root / "fresh", "fresh", "1.0.0", has_setup=True)
+
+    result: dict = {}
+    _scan_extensions_root(ext_root, result)
+
+    assert "fresh/default" in result
+    cls, _manifest, _ext_dir = result["fresh/default"]
+    # cls is None when subprocess_mode was selected; a real class when direct.
+    assert cls is None, "setup.py-bearing extension must enter subprocess mode"
