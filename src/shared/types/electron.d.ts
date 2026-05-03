@@ -15,17 +15,24 @@ export interface ExtensionNode {
   hfSkipPrefixes?:  string[]
 }
 
+export interface ExtensionCompatibility {
+  platforms?:    ('win32' | 'linux' | 'darwin')[]
+  requires_cuda?: boolean
+  features?:     Record<string, { platforms?: ('win32' | 'linux' | 'darwin')[] }>
+}
+
 export interface ModelExtension {
-  type:         'model'
-  id:           string
-  name:         string
-  version?:     string
-  description?: string
-  author?:      string
-  trusted:      boolean
-  builtin:      boolean
-  source?:      string
-  nodes:        ExtensionNode[]
+  type:           'model'
+  id:             string
+  name:           string
+  version?:       string
+  description?:   string
+  author?:        string
+  trusted:        boolean
+  builtin:        boolean
+  source?:        string
+  compatibility?: ExtensionCompatibility
+  nodes:          ExtensionNode[]
 }
 
 export interface ParamSchema {
@@ -41,17 +48,18 @@ export interface ParamSchema {
 }
 
 export interface ProcessExtension {
-  type:         'process'
-  id:           string
-  name:         string
-  version?:     string
-  description?: string
-  author?:      string
-  trusted:      boolean
-  builtin:      boolean
-  source?:      string
-  entry:        string
-  nodes:        ExtensionNode[]
+  type:           'process'
+  id:             string
+  name:           string
+  version?:       string
+  description?:   string
+  author?:        string
+  trusted:        boolean
+  builtin:        boolean
+  source?:        string
+  compatibility?: ExtensionCompatibility
+  entry:          string
+  nodes:          ExtensionNode[]
 }
 
 export type AnyExtension = ModelExtension | ProcessExtension

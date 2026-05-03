@@ -26,6 +26,19 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
 
   const badge = TYPE_BADGE[ext.type] ?? TYPE_BADGE.model
 
+  // Platform incompatibility — surface up front instead of letting the
+  // user click Download or Repair and bounce off the IPC guard. The
+  // setup.py path would also fail (CUDA-only wheels) on incompatible
+  // hosts, so disabling Repair is correct too. An empty platforms array
+  // is treated as 'no constraint' to match the server-side registry.
+  const supportedPlats   = ext.compatibility?.platforms
+  const platformBlocked  = !!supportedPlats
+                          && supportedPlats.length > 0
+                          && !supportedPlats.includes(window.electron.platform)
+  const platformBlockMsg = platformBlocked && supportedPlats
+    ? `Not supported on ${window.electron.platform}. Supported: ${supportedPlats.join(', ')}.`
+    : ''
+
   async function handleRepair() {
     setRepairing(true)
     setRepairError(null)
@@ -39,7 +52,11 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
   }
 
   return (
-    <div className="flex flex-col gap-3 px-4 py-4 rounded-2xl border border-zinc-800 bg-zinc-900/60 hover:border-zinc-700 transition-all overflow-hidden">
+    <div className={`flex flex-col gap-3 px-4 py-4 rounded-2xl border bg-zinc-900/60 transition-all overflow-hidden ${
+      platformBlocked
+        ? 'border-zinc-800/60 opacity-65'
+        : 'border-zinc-800 hover:border-zinc-700'
+    }`}>
 
       {/* Header */}
       <div className="flex items-start gap-2.5">
@@ -68,6 +85,21 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
                   <polyline points="9 12 11 14 15 10"/>
                 </svg>
                 Official
+              </span>
+            )}
+
+            {/* Platform compatibility badge — only when blocked */}
+            {platformBlocked && (
+              <span
+                title={platformBlockMsg}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-950/40 border border-amber-700/40 text-amber-400 text-[10px] font-medium shrink-0"
+              >
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                  <line x1="12" y1="9" x2="12" y2="13"/>
+                  <line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                Incompatible
               </span>
             )}
           </div>
@@ -100,8 +132,21 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
         )}
       </div>
 
+      {/* Platform incompatibility banner — replaces the Repair flow when
+          there's no point trying to set this extension up locally. */}
+      {platformBlocked && (
+        <div className="flex items-start gap-1.5 px-2.5 py-2 rounded-lg bg-amber-950/25 border border-amber-800/30">
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-400 shrink-0 mt-px">
+            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          <p className="text-[10px] text-amber-400 break-words">{platformBlockMsg}</p>
+        </div>
+      )}
+
       {/* Load error */}
-      {(loadError || repairError) && (
+      {(loadError || repairError) && !platformBlocked && (
         <div className="flex items-start gap-1.5 px-2.5 py-2 rounded-lg bg-red-950/30 border border-red-800/30">
           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400 shrink-0 mt-px">
             <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
@@ -110,8 +155,9 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
         </div>
       )}
 
-      {/* Repair — always visible for model extensions */}
-      {ext.type === 'model' && (
+      {/* Repair — visible for model extensions, hidden when the platform
+          can't run this extension at all (setup.py would just fail). */}
+      {ext.type === 'model' && !platformBlocked && (
         <button
           onClick={handleRepair}
           disabled={repairing || disabled}
@@ -211,11 +257,15 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
                     </div>
                   ) : (
                     <button
-                      onClick={() => !disabled && onInstall(node, fullId)}
-                      disabled={disabled}
-                      title={disabled ? 'A download is already in progress' : `Download ${node.name} weights`}
+                      onClick={() => !disabled && !platformBlocked && onInstall(node, fullId)}
+                      disabled={disabled || platformBlocked}
+                      title={
+                        platformBlocked ? platformBlockMsg :
+                        disabled        ? 'A download is already in progress' :
+                                          `Download ${node.name} weights`
+                      }
                       className={`w-full flex items-center justify-center gap-1 px-2 py-1 rounded-lg border text-[10px] font-semibold transition-all ${
-                        !disabled
+                        !disabled && !platformBlocked
                           ? 'bg-accent/15 border-accent/25 text-accent-light hover:bg-accent/25 hover:border-accent/40 cursor-pointer'
                           : 'bg-zinc-800/40 border-zinc-700/30 text-zinc-600 cursor-not-allowed'
                       }`}
@@ -225,7 +275,7 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
                         <polyline points="7 10 12 15 17 10"/>
                         <line x1="12" y1="15" x2="12" y2="3"/>
                       </svg>
-                      Download
+                      {platformBlocked ? 'Unavailable' : 'Download'}
                     </button>
                   )}
                 </div>
