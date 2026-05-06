@@ -1,9 +1,18 @@
 import asyncio
 import json
+import sys
+import time
 from typing import Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from services.generator_registry import generator_registry, MODELS_DIR
+
+
+def _log_download(line: str) -> None:
+    """Stderr-only marker so the FastAPI console shows liveness during the
+    per-file download loop, which is otherwise silent between files."""
+    sys.stderr.write(line + "\n")
+    sys.stderr.flush()
 
 router = APIRouter(tags=["model"])
 
@@ -104,8 +113,10 @@ async def hf_download(repo_id: str, model_id: str, skip_prefixes: Optional[str] 
         def _fmt(data: dict) -> str:
             return f"data: {json.dumps(data)}\n\n"
 
+        t_start = time.time()
         try:
             yield _fmt({"percent": 0, "status": "Listing repository files..."})
+            _log_download(f"[hf-download] start: {repo_id} → {dest_dir}")
 
             def _list_files():
                 from huggingface_hub import list_repo_files
@@ -118,32 +129,52 @@ async def hf_download(repo_id: str, model_id: str, skip_prefixes: Optional[str] 
             total = len(files)
 
             if total == 0:
-                yield _fmt({"error": f"No files found in HuggingFace repo: {repo_id}"})
+                msg = f"No files found in HuggingFace repo: {repo_id}"
+                _log_download(f"[hf-download] fail: {repo_id} — {msg}")
+                yield _fmt({"error": msg})
                 return
 
             yield _fmt({"percent": 1, "status": f"Downloading {total} files..."})
+            _log_download(f"[hf-download] {repo_id}: {total} files to fetch")
 
             from huggingface_hub import hf_hub_download
 
             for i, filename in enumerate(files):
+                # local_dir_use_symlinks was removed because newer huggingface_hub
+                # ignores it and emits a UserWarning; with local_dir set, files
+                # land directly in dest_dir without symlinks anyway.
                 def _dl(f=filename):
                     hf_hub_download(
                         repo_id=repo_id,
                         filename=f,
                         local_dir=dest_dir,
-                        local_dir_use_symlinks=False,
                         token=hf_token,
                     )
 
-                await loop.run_in_executor(None, _dl)
+                t_file = time.time()
+                _log_download(f"[hf-download] start: {filename} ({i + 1}/{total})")
+                try:
+                    await loop.run_in_executor(None, _dl)
+                except Exception as exc:
+                    _log_download(
+                        f"[hf-download] fail:  {filename} — "
+                        f"{exc.__class__.__name__}: {exc} (after {time.time() - t_file:.1f}s)"
+                    )
+                    raise
+                _log_download(f"[hf-download] ok:    {filename} ({time.time() - t_file:.1f}s)")
 
                 # Reserve 1-95 for file downloads, leave 95-100 for finalisation
                 pct = 1 + round((i + 1) / total * 94)
                 yield _fmt({"percent": pct, "file": filename, "fileIndex": i + 1, "totalFiles": total})
 
+            _log_download(f"[hf-download] ok:    {repo_id} ({total} files, {time.time() - t_start:.1f}s)")
             yield _fmt({"percent": 100, "status": "done"})
 
         except Exception as exc:
+            _log_download(
+                f"[hf-download] fail: {repo_id} — "
+                f"{exc.__class__.__name__}: {exc} (after {time.time() - t_start:.1f}s)"
+            )
             yield _fmt({"error": str(exc)})
 
     return StreamingResponse(stream(), media_type="text/event-stream")
