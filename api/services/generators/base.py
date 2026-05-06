@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -227,18 +228,65 @@ class BaseGenerator(ABC):
 
         from huggingface_hub import snapshot_download
 
-        print(f"[{self.__class__.__name__}] Downloading {self.hf_repo} → {self.model_dir} …")
         self.model_dir.mkdir(parents=True, exist_ok=True)
-
         ignore = list(self.hf_skip_prefixes) + [
             "*.md", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes",
         ]
-        snapshot_download(
-            repo_id=self.hf_repo,
-            local_dir=str(self.model_dir),
-            ignore_patterns=ignore,
-        )
-        print(f"[{self.__class__.__name__}] Download complete.")
+
+        def _do() -> None:
+            snapshot_download(
+                repo_id=self.hf_repo,
+                local_dir=str(self.model_dir),
+                ignore_patterns=ignore,
+            )
+
+        self._run_download(f"{self.hf_repo} → {self.model_dir}", _do)
+
+    # ------------------------------------------------------------------ #
+    # Download instrumentation
+    # ------------------------------------------------------------------ #
+
+    def _run_download(
+        self,
+        label:        str,
+        fn:           Callable[[], None],
+        progress_cb:  Optional[Callable[[int, str], None]] = None,
+        pct:          Optional[int] = None,
+    ) -> None:
+        """
+        Wrap a download function with structured stderr markers and timing.
+
+        Emits three line types so console viewers (and any log-scraping UX)
+        can show explicit start / success / failure regardless of which
+        library does the actual transfer:
+
+            [<Class>] [DOWNLOAD] start: <label>
+            [<Class>] [DOWNLOAD] ok:    <label> (Ts)
+            [<Class>] [DOWNLOAD] fail:  <label> — <ErrType>: <msg> (after Ts)
+
+        Optional progress_cb / pct lets callers nudge the generation bar
+        and label so the UI doesn't look frozen during long downloads.
+        Re-raises on failure — callers stay in control of recovery.
+        """
+        cls = self.__class__.__name__
+        sys.stderr.write(f"[{cls}] [DOWNLOAD] start: {label}\n")
+        sys.stderr.flush()
+        if progress_cb is not None and pct is not None:
+            progress_cb(pct, f"Downloading {label}…")
+        t0 = time.time()
+        try:
+            fn()
+        except Exception as exc:
+            elapsed = time.time() - t0
+            sys.stderr.write(
+                f"[{cls}] [DOWNLOAD] fail: {label} — "
+                f"{exc.__class__.__name__}: {exc} (after {elapsed:.1f}s)\n"
+            )
+            sys.stderr.flush()
+            raise
+        elapsed = time.time() - t0
+        sys.stderr.write(f"[{cls}] [DOWNLOAD] ok:    {label} ({elapsed:.1f}s)\n")
+        sys.stderr.flush()
 
     # ------------------------------------------------------------------ #
     # Helpers
