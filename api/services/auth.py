@@ -15,6 +15,7 @@ browser anchor/img elements where custom headers cannot be attached.
 Their threat surface is bounded by the existing path-traversal guards
 on WORKSPACE_DIR.
 """
+import hmac
 import os
 
 from fastapi import Request
@@ -57,7 +58,11 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         if _is_exempt(request.method, request.url.path):
             return await call_next(request)
 
-        if request.headers.get(TOKEN_HEADER) != expected:
+        provided = request.headers.get(TOKEN_HEADER, "")
+        # compare_digest avoids leaking length/match progress through
+        # response timing. Threat model is local-only so the practical
+        # risk is small, but the cost of doing it right is one stdlib call.
+        if not hmac.compare_digest(provided, expected):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Invalid or missing API token"},

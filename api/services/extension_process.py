@@ -213,6 +213,12 @@ class ExtensionProcess:
     # ------------------------------------------------------------------ #
 
     def is_downloaded(self) -> bool:
+        # model_dir is set by GeneratorRegistry right after construction,
+        # but defensive code (UI status polling, tests, manual instantiation)
+        # can hit this before that happens. Treat 'no path' as 'not yet'
+        # rather than raising AttributeError on `None / ...`.
+        if self.model_dir is None:
+            return False
         if self.download_check:
             return (self.model_dir / self.download_check).exists()
         return self.model_dir.exists() and any(self.model_dir.iterdir())

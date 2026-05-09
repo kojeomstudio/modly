@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 import sys
 from fastapi import APIRouter, HTTPException
@@ -42,15 +43,24 @@ async def setup_extension(ext_id: str):
         # No setup.py → legacy extension, nothing to do
         return {"status": "skipped", "reason": "no setup.py"}
 
-    # Detect GPU compute capability
-    gpu_sm = _detect_gpu_sm()
+    # Detect GPU compute capability + CUDA toolkit version. Both are needed
+    # because mini/turbo setup.py picks a torch wheel index based on the
+    # combination — passing only gpu_sm collapsed Blackwell (cu128) onto the
+    # cu124 path. We pass JSON in a single argv so the schema stays stable.
+    gpu_sm       = _detect_gpu_sm()
+    cuda_version = _detect_cuda_version()
+    args = json.dumps({
+        "python_exe":   sys.executable,
+        "ext_dir":      str(ext_dir),
+        "gpu_sm":       gpu_sm,
+        "cuda_version": cuda_version,
+    })
 
-    # Run setup.py using Modly's embedded Python (sys.executable)
     loop   = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None,
         lambda: subprocess.run(
-            [sys.executable, str(setup_py), sys.executable, str(ext_dir), str(gpu_sm)],
+            [sys.executable, str(setup_py), args],
             capture_output=True,
             text=True,
         )
@@ -60,9 +70,10 @@ async def setup_extension(ext_id: str):
         raise HTTPException(500, f"setup.py failed:\n{result.stderr}")
 
     return {
-        "status": "ok",
-        "gpu_sm": gpu_sm,
-        "output": result.stdout,
+        "status":       "ok",
+        "gpu_sm":       gpu_sm,
+        "cuda_version": cuda_version,
+        "output":       result.stdout,
     }
 
 
@@ -83,3 +94,24 @@ def _detect_gpu_sm() -> int:
     except Exception:
         pass
     return 0
+
+
+def _detect_cuda_version() -> int:
+    """Returns CUDA toolkit version torch was built against, encoded as int.
+
+    Example: 12.4 → 124, 12.8 → 128, 11.8 → 118. Returns 0 when CUDA is
+    unavailable (macOS, CPU-only torch). The mini/turbo setup.py uses this
+    to pick between cu124 and cu128 wheel indexes — without it Blackwell
+    GPUs end up on the cu124 path and re-downloading torch on first run.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return 0
+        ver = torch.version.cuda  # e.g. "12.4"
+        if not ver:
+            return 0
+        major, minor = ver.split(".")[:2]
+        return int(major) * 10 + int(minor)
+    except Exception:
+        return 0

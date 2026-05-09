@@ -3,11 +3,21 @@ BaseGenerator — contract that each model adapter must implement.
 """
 from abc import ABC, abstractmethod
 import os
+import platform
 import sys
 import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional, Tuple
+
+
+# huggingface_hub spawns parallel multiprocessing workers for snapshot
+# downloads. On macOS that races with the extension subprocess setup and
+# leaks semaphores ("resource_tracker: leaked semaphore objects"), which
+# can crash the runner mid-fetch. Force serial workers on Darwin so any
+# extension that uses the default _auto_download() path is safe; other
+# platforms keep the parallel default for speed.
+_HF_DOWNLOAD_KWARGS: dict = {"max_workers": 1} if platform.system() == "Darwin" else {}
 
 
 class GenerationCancelled(Exception):
@@ -238,6 +248,7 @@ class BaseGenerator(ABC):
                 repo_id=self.hf_repo,
                 local_dir=str(self.model_dir),
                 ignore_patterns=ignore,
+                **_HF_DOWNLOAD_KWARGS,
             )
 
         self._run_download(f"{self.hf_repo} → {self.model_dir}", _do)

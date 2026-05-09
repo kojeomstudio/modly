@@ -23,7 +23,7 @@ _cancel_events: Dict[str, threading.Event] = {}
 async def generate_from_image(
     background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
-    model_id: str = Form("sf3d"),
+    model_id: str = Form(""),
     collection: str = Form("Default"),
     remesh: str = Form("quad"),
     enable_texture: bool = Form(False),
@@ -35,6 +35,12 @@ async def generate_from_image(
 
     if remesh not in ("quad", "triangle", "none"):
         raise HTTPException(400, "remesh must be 'quad', 'triangle', or 'none'")
+
+    # No baked-in default — if the renderer didn't pick a model, fall back
+    # to the registry's currently active one rather than to a literal "sf3d"
+    # that no longer exists in this fork.
+    if not model_id:
+        model_id = generator_registry.active_status()["id"]
 
     # Sanitize collection name: strip, forbid path separators and special chars
     collection = collection.strip()
