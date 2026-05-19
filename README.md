@@ -95,6 +95,11 @@ Modly supports external AI model extensions. Each extension is a GitHub reposito
 
 Join the [Discord server](https://discord.gg/BvjDCvS3yr) to stay up to date with the latest news, report bugs, and share feedback.
 
+Follow Modly and its development on X:
+
+- [Modly on X](https://x.com/modly3d)
+- [Lightning Pixel on X](https://x.com/lightningpiixel)
+
 ---
 
 ## License

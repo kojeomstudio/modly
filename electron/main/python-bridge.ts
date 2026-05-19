@@ -169,7 +169,7 @@ export class PythonBridge {
         // Built-ins shipped with the .app live in userData/builtin-extensions
         // and are scanned by the registry alongside user-installed extensions.
         BUILTIN_EXTENSIONS_DIR:    getBuiltinExtensionsDir(),
-        SELECTED_MODEL_ID:         process.env['SELECTED_MODEL_ID'] ?? '',
+        ...(process.env['SELECTED_MODEL_ID'] ? { SELECTED_MODEL_ID: process.env['SELECTED_MODEL_ID'] } : {}),
         HUGGING_FACE_HUB_TOKEN:    this.resolveHfToken(),
         HF_TOKEN:                  this.resolveHfToken(),
         MODLY_API_TOKEN:           this.apiToken,
