@@ -102,6 +102,34 @@ Follow Modly and its development on X:
 
 ---
 
+## Sponsors
+
+<p align="center">
+  Thanks to our early sponsors for believing in Modly and helping make local AI 3D generation more accessible.
+</p>
+
+<p align="center">
+  <kbd>
+    <img src="https://images.weserv.nl/?url=github.com/DrHepa.png&w=96&h=96&fit=cover&mask=circle" width="40" height="40" alt="DrHepa" />
+    <br />
+    <sub><a href="https://github.com/DrHepa">DrHepa</a></sub>
+  </kbd>
+  &nbsp;&nbsp;
+  <kbd>
+    <img src="https://images.weserv.nl/?url=github.com/benjapenjamin.png&w=96&h=96&fit=cover&mask=circle" width="40" height="40" alt="benjapenjamin" />
+    <br />
+    <sub><a href="https://github.com/benjapenjamin">benjapenjamin</a></sub>
+  </kbd>
+  &nbsp;&nbsp;
+  <kbd>
+    <img src="https://images.weserv.nl/?url=github.com/iammojogo-sudo.png&w=96&h=96&fit=cover&mask=circle" width="40" height="40" alt="iammojogo-sudo" />
+    <br />
+    <sub><a href="https://github.com/iammojogo-sudo">iammojogo-sudo</a></sub>
+  </kbd>
+</p>
+
+---
+
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
