@@ -110,6 +110,36 @@ export function Select({ value, onChange, options }: {
   )
 }
 
+export function SegmentedControl<T extends string>({ value, onChange, options, ariaLabel }: {
+  value: T
+  onChange: (v: T) => void
+  options: { value: T; label: string }[]
+  ariaLabel?: string
+}): JSX.Element {
+  return (
+    <div role="group" aria-label={ariaLabel} className="inline-flex p-0.5 rounded-lg bg-zinc-800 border border-zinc-700">
+      {options.map((o) => {
+        const active = o.value === value
+        return (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(o.value)}
+            className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+              active
+                ? 'bg-accent/20 text-accent-light'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            {o.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 export function LinkButton({ label, href }: { label: string; href?: string }): JSX.Element {
   const handleClick = (): void => {
     if (href) window.open(href, '_blank')

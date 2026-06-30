@@ -27,6 +27,8 @@ api/*.pyc
 api/**/*.pyc
 api/.venv/
 api/venv/
+tools/modly-cli/__pycache__/
+.hermes-e2e/
 
 # Models (heavy, downloaded at runtime)
 /models/
@@ -52,3 +54,9 @@ Thumbs.db
 .env
 .env.local
 
+# TypeScript incremental build output
+*.tsbuildinfo
+
+# Local dev helpers
+install.bat
+launch.bat

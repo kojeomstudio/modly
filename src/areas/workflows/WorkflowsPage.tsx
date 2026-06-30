@@ -17,10 +17,12 @@ import {
 import { useWorkflowsStore } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useNavStore } from '@shared/stores/navStore'
+import { useAppStore } from '@shared/stores/appStore'
 import type { Workflow, WFNode, WFEdge, WFNodeData } from '@shared/types/electron.d'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import { useWorkflowRunStore } from './workflowRunStore'
+import { validateWorkflowPreflight } from './preflight'
 import ExtensionNode    from './nodes/ExtensionNode'
 import ImageNode        from './nodes/ImageNode'
 import TextNode         from './nodes/TextNode'
@@ -673,7 +675,7 @@ function HelpModal({ onClose }: { onClose: () => void }) {
                 <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border border-violet-500/30 bg-violet-500/10 text-violet-400 shrink-0 mt-0.5">mesh</span>
                 <div>
                   <p className="text-[11px] font-medium text-zinc-200">Load 3D Mesh</p>
-                  <p className="text-[11px] text-zinc-500 mt-0.5 leading-relaxed">Source node. Load a .glb, .obj, .stl or .ply file from disk, or use the model currently loaded in the 3D viewer.</p>
+                  <p className="text-[11px] text-zinc-500 mt-0.5 leading-relaxed">Source node. Load a .glb, .obj, .stl, .ply or .splat file from disk, or use the model currently loaded in the 3D viewer.</p>
                 </div>
               </div>
 
@@ -781,6 +783,8 @@ function WorkflowCanvasInner({
 }) {
   const { screenToFlowPosition, updateNodeData, getNode } = useReactFlow()
   const { runState, run: runWorkflow, cancel } = useWorkflowRunStore()
+  const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
+  const showToast = useAppStore((s) => s.showToast)
   const isRunning = runState.status === 'running' || runState.status === 'paused'
 
   const [nodes, setNodes, onNodesChange] = useNodesState(workflow.nodes as Node[])
@@ -795,6 +799,8 @@ function WorkflowCanvasInner({
   const [pendingDropPos, setPendingDropPos] = useState<{ x: number; y: number } | null>(null)
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const preflightToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const didMountRef = useRef(false)
 
   // ─── Undo / Redo ──────────────────────────────────────────────────────────
   type Snapshot = { nodes: Node[]; edges: Edge[]; name: string }
@@ -841,6 +847,32 @@ function WorkflowCanvasInner({
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current) }
   }, [nodes, edges, name])
 
+  const preflightIssues = useMemo(() => {
+    const draft: Workflow = {
+      ...workflow,
+      name,
+      nodes: nodes as WFNode[],
+      edges: edges as WFEdge[],
+      updatedAt: workflow.updatedAt,
+    }
+    return validateWorkflowPreflight(draft, allExtensions, { currentMeshUrl })
+  }, [workflow, name, nodes, edges, allExtensions, currentMeshUrl])
+
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true
+      return
+    }
+    if (preflightToastTimer.current) clearTimeout(preflightToastTimer.current)
+    if (preflightIssues.length === 0) return
+    preflightToastTimer.current = setTimeout(() => {
+      showToast(preflightIssues[0].message)
+    }, 250)
+    return () => {
+      if (preflightToastTimer.current) clearTimeout(preflightToastTimer.current)
+    }
+  }, [preflightIssues, showToast])
+
   const undo = useCallback(() => {
     const idx = histIdxRef.current
     if (idx <= 0) return
@@ -873,9 +905,22 @@ function WorkflowCanvasInner({
   const isValidConnection = useCallback((connection: Connection) => {
     const srcType = getNodeOutputType(getNode(connection.source) as Node, allExtensions)
     const tgtType = getNodeInputType(getNode(connection.target) as Node, connection.targetHandle, allExtensions)
-    if (!srcType || !tgtType) return true  // unknown type — allow
-    return srcType === tgtType
-  }, [getNode, allExtensions])
+    if (srcType && tgtType && srcType !== tgtType) return false  // type mismatch (unknown types allowed)
+    // Reject connections that would create a cycle: if the target can already
+    // reach the source, adding source→target closes a loop.
+    if (connection.source && connection.target) {
+      const stack = [connection.target]
+      const seen  = new Set<string>()
+      while (stack.length > 0) {
+        const id = stack.pop()!
+        if (id === connection.source) return false
+        if (seen.has(id)) continue
+        seen.add(id)
+        for (const e of edges) if (e.source === id) stack.push(e.target)
+      }
+    }
+    return true
+  }, [getNode, allExtensions, edges])
 
   const onConnectStart = useCallback((_: React.MouseEvent | React.TouchEvent, params: OnConnectStartParams) => {
     pendingConnectionRef.current  = params
@@ -980,10 +1025,14 @@ function WorkflowCanvasInner({
 
   const handleRun = useCallback(() => {
     if (isRunning) { cancel(); return }
+    if (preflightIssues.length > 0) {
+      showToast(preflightIssues[0].message)
+      return
+    }
     const wf: Workflow = { ...workflow, name, nodes: nodes as WFNode[], edges: edges as WFEdge[], updatedAt: new Date().toISOString() }
     onSave(wf)
     runWorkflow(wf, allExtensions)
-  }, [workflow, name, nodes, edges, onSave, allExtensions, isRunning, runWorkflow, cancel])
+  }, [workflow, name, nodes, edges, onSave, allExtensions, isRunning, runWorkflow, cancel, preflightIssues, showToast])
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">

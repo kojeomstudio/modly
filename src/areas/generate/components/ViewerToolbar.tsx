@@ -7,6 +7,7 @@ interface ViewerToolbarProps {
   onViewMode: (mode: ViewMode) => void
   onAutoRotate: () => void
   onScreenshot: () => void
+  showViewModes?: boolean   // view modes are mesh-only; hidden for splats
 }
 
 const MODES: { mode: ViewMode; icon: React.ReactNode; label: string }[] = [
@@ -72,10 +73,11 @@ export function ViewerToolbar({
   onViewMode,
   onAutoRotate,
   onScreenshot,
+  showViewModes = true,
 }: ViewerToolbarProps): JSX.Element {
   return (
     <div className="absolute left-4 top-1/2 -translate-y-1/2 z-20 flex flex-col gap-1 bg-zinc-900/70 border border-zinc-700/50 backdrop-blur-sm rounded-xl p-1.5">
-      {MODES.map(({ mode, icon, label }) => (
+      {showViewModes && MODES.map(({ mode, icon, label }) => (
         <ToolbarButton
           key={mode}
           active={viewMode === mode}
@@ -86,7 +88,7 @@ export function ViewerToolbar({
         </ToolbarButton>
       ))}
 
-      <div className="my-1 border-t border-zinc-700/50" />
+      {showViewModes && <div className="my-1 border-t border-zinc-700/50" />}
 
       <ToolbarButton
         active={autoRotate}

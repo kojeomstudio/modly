@@ -1,6 +1,14 @@
 // Type declarations for the Electron API exposed via preload
 export {}
 
+import type {
+  AssetLibraryListResult,
+  AssetLibraryOpenRequest,
+  AssetLibraryOpenResult,
+  AssetLibraryReadRequest,
+  AssetLibraryReadResult,
+} from './assetLibrary'
+
 // ─── Extension types ──────────────────────────────────────────────────────────
 
 export interface ExtensionNode {
@@ -10,9 +18,11 @@ export interface ExtensionNode {
   inputs?:          ('image' | 'text' | 'mesh')[]   // multi-input nodes; overrides input when set
   output:           'image' | 'text' | 'mesh'
   paramsSchema:     ParamSchema[]
+  paramDefaults?:   Record<string, number | string>
   hfRepo?:          string
   downloadCheck?:   string
   hfSkipPrefixes?:  string[]
+  hfIncludePrefixes?: string[]
 }
 
 export interface ExtensionCompatibility {
@@ -31,6 +41,7 @@ export interface ModelExtension {
   trusted:        boolean
   builtin:        boolean
   source?:        string
+  localPath?:     string
   compatibility?: ExtensionCompatibility
   nodes:          ExtensionNode[]
 }
@@ -58,6 +69,7 @@ export interface ProcessExtension {
   trusted:        boolean
   builtin:        boolean
   source?:        string
+  localPath?:     string
   compatibility?: ExtensionCompatibility
   entry:          string
   nodes:          ExtensionNode[]
@@ -118,10 +130,16 @@ declare global {
       shell: {
         openExternal: (url: string) => Promise<void>
       }
+      system: {
+        memory: () => Promise<{ total: number; used: number; available: number }>
+      }
       window: {
         minimize: () => void
         maximize: () => void
         close:    () => void
+      }
+      ui: {
+        setZoomFactor: (factor: number) => void
       }
       python: {
         start:     () => Promise<{ success: boolean; port?: number; error?: string }>
@@ -136,7 +154,7 @@ declare global {
         selectMeshFile:  () => Promise<string | null>
         saveModel:       (defaultName: string) => Promise<string | null>
         readFileBase64:  (filePath: string) => Promise<string>
-        selectDirectory: () => Promise<string | null>
+        selectDirectory: (defaultPath?: string) => Promise<string | null>
         savePath:        (args: { filters: { name: string; extensions: string[] }[]; defaultPath?: string }) => Promise<string | null>
         listDir:         (dirPath: string) => Promise<string[]>
         moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>
@@ -156,12 +174,26 @@ declare global {
       model: {
         export:         (args: { outputUrl: string; format: string }) => Promise<{ success: boolean; error?: string }>
         listDownloaded: () => Promise<{ id: string; name: string; size_gb: number }[]>
-        isDownloaded:   (modelId: string) => Promise<boolean>
-        download:       (repoId: string, modelId: string, skipPrefixes?: string[]) => Promise<{ success: boolean; error?: string }>
+        isDownloaded:   (modelId: string, downloadCheck?: string) => Promise<boolean>
+        download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) => Promise<{ success: boolean; error?: string }>
+        pauseDownload:  (modelId: string) => Promise<{ success: boolean; error?: string }>
+        cancelDownload: (modelId: string) => Promise<{ success: boolean; error?: string }>
         delete:         (modelId: string) => Promise<{ success: boolean; error?: string }>
         unloadAll:      () => Promise<{ success: boolean; error?: string }>
         showInFolder:   (modelId: string) => Promise<void>
-        onProgress:     (cb: (data: { modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number; status?: string }) => void) => void
+        onProgress:     (cb: (data: {
+          modelId: string
+          percent: number
+          file?: string
+          fileIndex?: number
+          totalFiles?: number
+          status?: string
+          bytesDownloaded?: number
+          totalBytes?: number
+          stalledSeconds?: number
+          paused?: boolean
+          cancelled?: boolean
+        }) => void) => void
         offProgress:    () => void
       }
       app: {
@@ -171,6 +203,8 @@ declare global {
           modelsDir: string
           apiUrl:    string
           apiToken:  string
+          platform:  string
+          arch:      string
         }>
         onError:  (cb: (message: string) => void) => void
         offError: () => void
@@ -189,9 +223,14 @@ declare global {
         listJobs: (collection: string) => Promise<unknown[]>
         saveJobMeta: (collection: string, filename: string, meta: unknown) => Promise<void>
         deleteJob: (collection: string, filename: string) => Promise<void>
+        library: {
+          list: () => Promise<AssetLibraryListResult>
+          read: (request: AssetLibraryReadRequest) => Promise<AssetLibraryReadResult>
+          open: (request: AssetLibraryOpenRequest) => Promise<AssetLibraryOpenResult>
+        }
       }
       setup: {
-        check:        () => Promise<{ needed: boolean; defaultDataDir: string }>
+        check:        () => Promise<{ needed: boolean; defaultDataDir: string; platform: string; arch: string }>
         run:          () => Promise<{ success: boolean; error?: string }>
         saveDataDir:  (baseDir: string) => Promise<void>
         onProgress:   (cb: (data: { step: string; percent: number; currentPackage?: string }) => void) => void
@@ -221,8 +260,17 @@ declare global {
         installFromGitHub: (url: string) => Promise<{
           success:      boolean
           error?:       string
+          cancelled?:   boolean
           extensionId?: string
           extension?:   AnyExtension
+        }>
+        installFromLocal:  () => Promise<{
+          success:      boolean
+          error?:       string
+          cancelled?:   boolean
+          extensionId?: string
+          extension?:   AnyExtension
+          localPath?:   string
         }>
         uninstall:   (extensionId: string) => Promise<{ success: boolean; error?: string }>
         repair:      (extensionId: string) => Promise<{ success: boolean; error?: string }>

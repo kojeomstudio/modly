@@ -1,11 +1,27 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
-import { useAppStore } from '@shared/stores/appStore'
-import type { GenerationJob } from '@shared/stores/appStore'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import type { ReactNode } from 'react'
+import { useAppStore, DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
+import type { GenerationJob, LightSettings } from '@shared/stores/appStore'
 import { useApi } from '@shared/hooks/useApi'
 import { ColorPicker } from '@shared/components/ui'
 import GenerationHUD from './components/GenerationHUD'
 import Viewer3D from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
+import { getDefaultAssetLibraryService } from './assetLibraryService'
+import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
+import {
+  ASSET_LIBRARY_SORT_OPTIONS,
+  buildAssetLibraryOpenRequest,
+  createAssetLibraryOpenJob,
+  describeAssetLibraryOpenability,
+  filterAssetLibraryScopeGroups,
+  getDefaultAssetLibraryCollapsedSectionKeys,
+  isAssetLibraryEntryOpenable,
+  resolveOpenPanelAfterLibrarySelection,
+  toggleAssetLibrarySectionKey,
+  type AssetLibrarySortMode,
+  type GenerateOpenPanel,
+} from './assetLibraryUi'
 
 const MIN_WIDTH = 220
 const MAX_WIDTH = 520
@@ -42,6 +58,38 @@ function ExportDropdown({
         </button>
       ))}
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// ToolButton — icon-only toolbar button with tooltip + active state
+// ---------------------------------------------------------------------------
+
+function ToolButton({
+  label,
+  active,
+  onClick,
+  children,
+}: {
+  label: string
+  active: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      className={`flex items-center justify-center w-7 h-7 rounded-lg border transition-colors
+        ${active
+          ? 'bg-zinc-700 border-zinc-600 text-zinc-200'
+          : 'bg-zinc-800 border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600'
+        }`}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -127,20 +175,6 @@ function DecimatePopover({
 // Light popover
 // ---------------------------------------------------------------------------
 
-export interface LightSettings {
-  mainIntensity: number
-  mainColor: string
-  fillIntensity: number
-  fillColor: string
-}
-
-export const DEFAULT_LIGHT_SETTINGS: LightSettings = {
-  mainIntensity: 1.5,
-  mainColor: '#ffffff',
-  fillIntensity: 0.6,
-  fillColor: '#ffffff',
-}
-
 function LightPopover({
   settings,
   onChange,
@@ -181,6 +215,27 @@ function LightPopover({
     )
   }
 
+  function plainRow(label: string, intensityKey: keyof LightSettings, max: number) {
+    const value = (settings[intensityKey] as number) ?? (DEFAULT_LIGHT_SETTINGS[intensityKey] as number)
+    return (
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-zinc-400 flex-1">{label}</span>
+          <span className="text-[10px] text-zinc-500 font-mono">{value.toFixed(2)}</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={max}
+          step={0.05}
+          value={value}
+          onChange={(e) => onChange({ ...settings, [intensityKey]: parseFloat(e.target.value) })}
+          className="w-full h-1.5 accent-violet-500 cursor-pointer"
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="absolute top-full right-0 mt-1 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl p-3 flex flex-col gap-3 min-w-[220px] shadow-xl">
       <div className="flex items-center justify-between">
@@ -194,6 +249,8 @@ function LightPopover({
       </div>
       {lightRow('Sun', 'mainColor', 'mainIntensity', 4)}
       {lightRow('Fill', 'fillColor', 'fillIntensity', 2)}
+      {plainRow('Ambient', 'ambientIntensity', 1.5)}
+      {plainRow('Environment', 'envIntensity', 2)}
       <button
         onClick={onClose}
         className="mt-1 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
@@ -267,38 +324,286 @@ function SmoothPopover({
 }
 
 // ---------------------------------------------------------------------------
+// Workspace library popover
+// ---------------------------------------------------------------------------
+
+function AssetLibraryToggleButton({
+  open,
+  disabled,
+  onToggle,
+}: {
+  open: boolean
+  disabled: boolean
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      disabled={disabled}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-colors disabled:opacity-50 disabled:pointer-events-none
+        ${open
+          ? 'bg-zinc-700 border-zinc-600 text-zinc-200'
+          : 'bg-zinc-800 border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600'
+        }`}
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
+        <path d="M4 6h16" />
+        <path d="M4 12h16" />
+        <path d="M4 18h10" />
+      </svg>
+      Library
+    </button>
+  )
+}
+
+function AssetLibraryPopover({
+  entries,
+  selectedEntryId,
+  loading,
+  opening,
+  error,
+  searchQuery,
+  sortMode,
+  collapsedSectionKeys,
+  onSelectEntry,
+  onSearchQueryChange,
+  onSortModeChange,
+  onToggleSection,
+  onOpenSelected,
+  onRefresh,
+  onClose,
+}: {
+  entries: ProjectedAssetLibraryEntry[]
+  selectedEntryId: string | null
+  loading: boolean
+  opening: boolean
+  error: string | null
+  searchQuery: string
+  sortMode: AssetLibrarySortMode
+  collapsedSectionKeys: string[]
+  onSelectEntry: (entryId: string) => void
+  onSearchQueryChange: (value: string) => void
+  onSortModeChange: (value: AssetLibrarySortMode) => void
+  onToggleSection: (sectionKey: string) => void
+  onOpenSelected: () => void
+  onRefresh: () => void
+  onClose: () => void
+}) {
+  const scopeGroups = filterAssetLibraryScopeGroups(entries, searchQuery, sortMode)
+  const visibleEntryIds = new Set(scopeGroups.flatMap((scopeGroup) => scopeGroup.entryGroups.flatMap((group) => group.entries.map((entry) => entry.id))))
+  const selectedEntry = selectedEntryId && visibleEntryIds.has(selectedEntryId)
+    ? entries.find((entry) => entry.id === selectedEntryId) ?? null
+    : null
+  const normalizedSearchQuery = searchQuery.trim()
+  const openDisabled = !selectedEntry || !isAssetLibraryEntryOpenable(selectedEntry) || loading || opening
+  const selectedMessage = selectedEntry
+    ? describeAssetLibraryOpenability(selectedEntry)
+    : scopeGroups.length === 0 && normalizedSearchQuery
+      ? `No workspace assets match “${normalizedSearchQuery}”.`
+      : 'Select an asset to open it in Generate.'
+
+  return (
+    <div
+      role="dialog"
+      aria-label="Workspace library"
+      className="absolute top-full left-0 mt-1 z-50 w-[320px] max-w-[calc(100vw-2rem)] bg-zinc-900 border border-zinc-700/60 rounded-xl p-3 flex flex-col gap-3 shadow-xl"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Workspace library</p>
+          <p className="text-xs text-zinc-300">Select a workspace asset and open the supported source in Generate.</p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
+        >
+          Close library
+        </button>
+      </div>
+
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={loading || opening}
+        className="self-start px-2.5 py-1.5 text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-colors"
+      >
+        Refresh assets
+      </button>
+
+      <div className="flex items-end gap-2">
+        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+          <label htmlFor="asset-library-search" className="text-[11px] text-zinc-300">Search workspace assets</label>
+          <input
+            id="asset-library-search"
+            type="search"
+            value={searchQuery}
+            onChange={(event) => onSearchQueryChange(event.target.value)}
+            placeholder="Search by name, path, scope, or capability"
+            className="bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+          />
+        </div>
+        <div className="flex w-24 shrink-0 flex-col gap-1.5">
+          <label htmlFor="asset-library-sort" className="text-[11px] text-zinc-300">Sort</label>
+          <select
+            id="asset-library-sort"
+            value={sortMode}
+            onChange={(event) => onSortModeChange(event.target.value as AssetLibrarySortMode)}
+            className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+          >
+            {ASSET_LIBRARY_SORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {loading ? (
+        <p role="status" className="text-xs text-zinc-400">Loading workspace assets…</p>
+      ) : scopeGroups.length === 0 && !normalizedSearchQuery ? (
+        <p role="status" className="text-xs text-zinc-500">No workspace assets are indexed yet.</p>
+      ) : scopeGroups.length === 0 ? (
+        <p role="status" className="text-xs text-zinc-500">{`No workspace assets match “${normalizedSearchQuery}”.`}</p>
+      ) : (
+        <div role="list" aria-label="Workspace library assets" className="max-h-64 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950/40">
+          {scopeGroups.map((scopeGroup) => {
+            const scopeExpanded = !collapsedSectionKeys.includes(scopeGroup.sectionKey)
+            const scopeRegionId = `asset-library-${scopeGroup.sectionKey.replace(/[^a-z0-9-]+/gi, '-')}`
+            return (
+              <section key={scopeGroup.sectionKey} role="group" aria-label={`Source scope ${scopeGroup.sourceScopeLabel}`} className="border-b border-zinc-800 last:border-b-0">
+                <button
+                  type="button"
+                  aria-expanded={scopeExpanded}
+                  aria-controls={scopeRegionId}
+                  onClick={() => onToggleSection(scopeGroup.sectionKey)}
+                  className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+                >
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-300">{scopeGroup.sourceScopeLabel}</span>
+                  <span className="text-[10px] text-zinc-500">{scopeExpanded ? 'Hide' : 'Show'}</span>
+                </button>
+                {scopeExpanded && (
+                  <div id={scopeRegionId}>
+                    {scopeGroup.entryGroups.map((group) => {
+                      const capabilityExpanded = !collapsedSectionKeys.includes(group.sectionKey)
+                      const capabilityRegionId = `asset-library-${group.sectionKey.replace(/[^a-z0-9-]+/gi, '-')}`
+                      return (
+                        <section key={group.sectionKey} role="group" aria-label={`Capability category ${group.capabilityLabel}`} className="border-t border-zinc-800 first:border-t-0">
+                          <button
+                            type="button"
+                            aria-expanded={capabilityExpanded}
+                            aria-controls={capabilityRegionId}
+                            onClick={() => onToggleSection(group.sectionKey)}
+                            className="flex w-full items-center justify-between gap-2 px-4 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+                          >
+                            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-400">{group.capabilityLabel}</span>
+                            <span className="text-[10px] text-zinc-500">{capabilityExpanded ? 'Hide' : 'Show'}</span>
+                          </button>
+                          {capabilityExpanded && (
+                            <div id={capabilityRegionId}>
+                              {group.entries.map((entry) => {
+                                const selected = entry.id === selectedEntryId
+                                return (
+                                  <button
+                                    key={entry.id}
+                                    type="button"
+                                    role="listitem"
+                                    aria-pressed={selected}
+                                    aria-label={`Select library asset ${entry.displayName}`}
+                                    onClick={() => onSelectEntry(entry.id)}
+                                    className={`w-full text-left px-4 py-2 border-t border-zinc-800 first:border-t-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400
+                                      ${selected ? 'bg-violet-500/10 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/80'}`}
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-xs font-medium">{entry.displayName}</span>
+                                      <span className="text-[10px] uppercase tracking-wider text-zinc-500">{entry.capability ?? entry.state.replace(/-/g, ' ')}</span>
+                                    </div>
+                                    <p className="mt-1 truncate text-[10px] text-zinc-500">{entry.workspacePath}</p>
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </section>
+                      )
+                    })}
+                  </div>
+                )}
+              </section>
+            )
+          })}
+        </div>
+      )}
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+        <p className="text-[11px] text-zinc-400">{selectedMessage}</p>
+        {error && <p role="alert" className="mt-2 text-[11px] text-amber-300">{error}</p>}
+      </div>
+
+      <button
+        type="button"
+        onClick={onOpenSelected}
+        disabled={openDisabled}
+        aria-label="Open selected asset"
+        className="px-3 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-xs rounded-lg transition-colors font-medium"
+      >
+        {opening ? 'Opening…' : 'Open selected asset'}
+      </button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // GeneratePage
 // ---------------------------------------------------------------------------
 
 export default function GeneratePage(): JSX.Element {
   const [unloadStatus, setUnloadStatus] = useState<'idle' | 'done'>('idle')
   const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH)
-  const [openPanel, setOpenPanel] = useState<'export' | 'decimate' | 'smooth' | 'import' | 'light' | null>(null)
-  const [lightSettings, setLightSettings] = useState<LightSettings>(DEFAULT_LIGHT_SETTINGS)
+  const [openPanel, setOpenPanel] = useState<GenerateOpenPanel>(null)
   const [decimating, setDecimating] = useState(false)
   const [smoothing, setSmoothing] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [libraryEntries, setLibraryEntries] = useState<ProjectedAssetLibraryEntry[]>([])
+  const [librarySelectedEntryId, setLibrarySelectedEntryId] = useState<string | null>(null)
+  const [libraryLoaded, setLibraryLoaded] = useState(false)
+  const [libraryLoading, setLibraryLoading] = useState(false)
+  const [libraryOpening, setLibraryOpening] = useState(false)
+  const [libraryError, setLibraryError] = useState<string | null>(null)
+  const [librarySearchQuery, setLibrarySearchQuery] = useState('')
+  const [librarySortMode, setLibrarySortMode] = useState<AssetLibrarySortMode>('type')
+  const [libraryCollapsedSectionKeys, setLibraryCollapsedSectionKeys] = useState<string[]>(() => getDefaultAssetLibraryCollapsedSectionKeys())
+  const [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | 'scale' | null>(null)
   const dragging = useRef(false)
+  // Populated by Viewer3D — undoes the latest live gizmo transform, if any.
+  const gizmoUndoRef = useRef<(() => boolean) | null>(null)
 
+  const lightSettings = useAppStore((s) => s.lightSettings)
+  const setLightSettings = useAppStore((s) => s.setLightSettings)
   const isGenerating = useAppStore((s) =>
     s.currentJob?.status === 'uploading' || s.currentJob?.status === 'generating'
   )
   const currentJob = useAppStore((s) => s.currentJob)
   const apiUrl = useAppStore((s) => s.apiUrl)
+  const showError = useAppStore((s) => s.showError)
   const updateCurrentJob = useAppStore((s) => s.updateCurrentJob)
   const setCurrentJob = useAppStore((s) => s.setCurrentJob)
   const meshStats = useAppStore((s) => s.meshStats)
+  const meshSelected = useAppStore((s) => s.meshSelected)
   const pushMeshUrl = useAppStore((s) => s.pushMeshUrl)
   const undoMesh = useAppStore((s) => s.undoMesh)
   const redoMesh = useAppStore((s) => s.redoMesh)
   const canUndo = useAppStore((s) => s.historyIndex > 0)
   const canRedo = useAppStore((s) => s.historyIndex < s.meshHistory.length - 1)
   const { optimizeMesh, smoothMesh, importMesh } = useApi()
+  const assetLibraryService = useMemo(() => getDefaultAssetLibraryService(), [])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.ctrlKey && !e.metaKey) return
-      if (e.key === 'z') { e.preventDefault(); undoMesh() }
+      if (e.key === 'z') { e.preventDefault(); if (gizmoUndoRef.current?.()) return; undoMesh() }
       if (e.key === 'y') { e.preventDefault(); redoMesh() }
     }
     window.addEventListener('keydown', handler)
@@ -306,6 +611,33 @@ export default function GeneratePage(): JSX.Element {
   }, [undoMesh, redoMesh])
 
   const hasModel = currentJob?.status === 'done' && !!currentJob.outputUrl
+
+  // Drop the active transform tool when the mesh is deselected, so it doesn't
+  // silently re-activate on the next selection.
+  useEffect(() => {
+    if (!meshSelected) setGizmoMode(null)
+  }, [meshSelected])
+
+  // Gizmo hotkeys: W move, R rotate, S scale, Esc exits. Ignored while typing.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)) return
+      if (e.key === 'Escape') { setGizmoMode((m) => (m ? null : m)); return }
+      if (!hasModel || !meshSelected) return
+      const k = e.key.toLowerCase()
+      if (k === 'w') setGizmoMode('translate')
+      else if (k === 'r') setGizmoMode('rotate')
+      else if (k === 's') setGizmoMode('scale')
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [hasModel, meshSelected])
+
+  useEffect(() => {
+    if (openPanel !== 'library' || libraryLoaded || libraryLoading) return
+    void loadLibraryEntries()
+  }, [openPanel, libraryLoaded, libraryLoading])
 
   async function handleUnloadAll() {
     await window.electron.model.unloadAll()
@@ -325,6 +657,16 @@ export default function GeneratePage(): JSX.Element {
     }
     link.download = `${stem}.${format}`
     link.click()
+  }
+
+  function getOptimizePath(url: string): string {
+    if (url.startsWith('/workspace/')) {
+      return url.slice('/workspace/'.length)
+    }
+    if (url.startsWith('/optimize/serve-file?path=')) {
+      return decodeURIComponent(url.split('path=')[1] ?? '')
+    }
+    return url
   }
 
   async function handleImportMesh() {
@@ -350,15 +692,81 @@ export default function GeneratePage(): JSX.Element {
     }
   }
 
+  async function loadLibraryEntries() {
+    setLibraryLoading(true)
+    setLibraryError(null)
+    try {
+      const result = await assetLibraryService.list()
+      if (!result.success) {
+        setLibraryLoaded(false)
+        setLibraryEntries([])
+        setLibrarySelectedEntryId(null)
+        setLibraryError(result.error.message)
+        return
+      }
+      setLibraryEntries(result.entries)
+      setLibrarySelectedEntryId((current) => current && result.entries.some((entry) => entry.id === current)
+        ? current
+        : result.entries.find(isAssetLibraryEntryOpenable)?.id ?? result.entries[0]?.id ?? null)
+      setLibraryLoaded(true)
+    } catch (err) {
+      setLibraryLoaded(false)
+      setLibraryEntries([])
+      setLibrarySelectedEntryId(null)
+      setLibraryError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLibraryLoading(false)
+    }
+  }
+
+  async function handleOpenSelectedLibraryEntry() {
+    const selectedEntry = libraryEntries.find((entry) => entry.id === librarySelectedEntryId) ?? null
+    if (!selectedEntry) {
+      setLibraryError('Select an asset before opening it in Generate.')
+      return
+    }
+    if (!isAssetLibraryEntryOpenable(selectedEntry)) {
+      setLibraryError(describeAssetLibraryOpenability(selectedEntry))
+      return
+    }
+
+    setLibraryOpening(true)
+    setLibraryError(null)
+    try {
+      const result = await assetLibraryService.open(buildAssetLibraryOpenRequest(selectedEntry))
+      if (!result.success) {
+        setLibraryError(result.error.message)
+        return
+      }
+      const target = resolveAssetLibraryOpenTarget(result.entry)
+      const selection = createAssetLibraryOpenJob(result.entry, target)
+      if (!selection) {
+        setLibraryError(describeAssetLibraryOpenability(result.entry))
+        return
+      }
+      setLibraryEntries((currentEntries) => currentEntries.map((entry) => entry.id === result.entry.id ? result.entry : entry))
+      setLibrarySelectedEntryId(result.entry.id)
+      setCurrentJob(selection.job)
+      pushMeshUrl(selection.historyUrl)
+      setOpenPanel((currentPanel) => resolveOpenPanelAfterLibrarySelection(currentPanel))
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLibraryOpening(false)
+    }
+  }
+
   async function handleSmooth(iterations: number) {
     if (!currentJob?.outputUrl) return
     setSmoothing(true)
     try {
-      const path = currentJob.outputUrl.replace('/workspace/', '')
+      const path = getOptimizePath(currentJob.outputUrl)
       const { url } = await smoothMesh(path, iterations)
       updateCurrentJob({ outputUrl: url })
       pushMeshUrl(url)
       setOpenPanel(null)
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err))
     } finally {
       setSmoothing(false)
     }
@@ -368,11 +776,13 @@ export default function GeneratePage(): JSX.Element {
     if (!currentJob?.outputUrl) return
     setDecimating(true)
     try {
-      const path = currentJob.outputUrl.replace('/workspace/', '')
+      const path = getOptimizePath(currentJob.outputUrl)
       const { url } = await optimizeMesh(path, targetFaces)
       updateCurrentJob({ outputUrl: url })
       pushMeshUrl(url)
       setOpenPanel(null)
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err))
     } finally {
       setDecimating(false)
     }
@@ -410,6 +820,21 @@ export default function GeneratePage(): JSX.Element {
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Header bar */}
         <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-surface-400 shrink-0">
+
+          {/* Free memory */}
+          <button
+            onClick={handleUnloadAll}
+            disabled={isGenerating}
+            title="Free model from memory"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium border bg-zinc-800 border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+              <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" />
+            </svg>
+            {unloadStatus === 'done' ? 'Freed' : 'Free memory'}
+          </button>
+
+          <div className="w-px h-4 bg-zinc-700/60" />
 
           {/* Undo / Redo */}
           <button
@@ -477,10 +902,43 @@ export default function GeneratePage(): JSX.Element {
                   </svg>
                   <div>
                     <p className="text-xs text-zinc-200">Mesh</p>
-                    <p className="text-[10px] text-zinc-500">.glb .obj .stl .ply</p>
+                    <p className="text-[10px] text-zinc-500">.glb .obj .stl .ply .splat</p>
                   </div>
                 </button>
               </div>
+            )}
+          </div>
+
+          <div className="relative">
+            <AssetLibraryToggleButton
+              open={openPanel === 'library'}
+              disabled={importing || libraryOpening}
+              onToggle={() => {
+                setLibraryError(null)
+                setOpenPanel((panel) => (panel === 'library' ? null : 'library'))
+              }}
+            />
+            {openPanel === 'library' && (
+              <AssetLibraryPopover
+                entries={libraryEntries}
+                selectedEntryId={librarySelectedEntryId}
+                loading={libraryLoading}
+                opening={libraryOpening}
+                error={libraryError}
+                searchQuery={librarySearchQuery}
+                sortMode={librarySortMode}
+                collapsedSectionKeys={libraryCollapsedSectionKeys}
+                onSelectEntry={(entryId) => {
+                  setLibraryError(null)
+                  setLibrarySelectedEntryId(entryId)
+                }}
+                onSearchQueryChange={setLibrarySearchQuery}
+                onSortModeChange={setLibrarySortMode}
+                onToggleSection={(sectionKey) => setLibraryCollapsedSectionKeys((current) => toggleAssetLibrarySectionKey(current, sectionKey))}
+                onOpenSelected={() => { void handleOpenSelectedLibraryEntry() }}
+                onRefresh={() => { void loadLibraryEntries() }}
+                onClose={() => setOpenPanel(null)}
+              />
             )}
           </div>
 
@@ -619,23 +1077,54 @@ export default function GeneratePage(): JSX.Element {
           </div>
         </div>
 
+        {/* Tools bar — always visible; transform tools appear once a mesh is selected */}
+        <div className="flex items-center gap-2 px-3 h-10 border-b border-zinc-800 bg-surface-400 shrink-0">
+          {hasModel && meshSelected && (
+            <>
+              <ToolButton
+                label="Move"
+                active={gizmoMode === 'translate'}
+                onClick={() => setGizmoMode((m) => (m === 'translate' ? null : 'translate'))}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                  <polyline points="5 9 2 12 5 15" />
+                  <polyline points="9 5 12 2 15 5" />
+                  <polyline points="15 19 12 22 9 19" />
+                  <polyline points="19 9 22 12 19 15" />
+                  <line x1="2" y1="12" x2="22" y2="12" />
+                  <line x1="12" y1="2" x2="12" y2="22" />
+                </svg>
+              </ToolButton>
+              <ToolButton
+                label="Rotate"
+                active={gizmoMode === 'rotate'}
+                onClick={() => setGizmoMode((m) => (m === 'rotate' ? null : 'rotate'))}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                  <path d="M21 2v6h-6" />
+                  <path d="M21 13a9 9 0 1 1-3-7.7L21 8" />
+                </svg>
+              </ToolButton>
+              <ToolButton
+                label="Scale"
+                active={gizmoMode === 'scale'}
+                onClick={() => setGizmoMode((m) => (m === 'scale' ? null : 'scale'))}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                  <path d="M15 3h6v6" />
+                  <path d="M9 21H3v-6" />
+                  <path d="M21 3l-7 7" />
+                  <path d="M3 21l7-7" />
+                </svg>
+              </ToolButton>
+            </>
+          )}
+        </div>
+
         {/* Viewer area */}
         <div className="flex-1 relative overflow-hidden">
-          <Viewer3D lightSettings={lightSettings} />
+          <Viewer3D lightSettings={lightSettings} gizmoMode={gizmoMode} gizmoUndoRef={gizmoUndoRef} />
           <GenerationHUD />
-
-          {/* Free memory — overlay top-left */}
-          <button
-            onClick={handleUnloadAll}
-            disabled={isGenerating}
-            title="Free model from memory"
-            className="absolute top-3 left-3 z-20 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-zinc-900/70 border border-zinc-700/50 backdrop-blur-sm text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-              <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" />
-            </svg>
-            {unloadStatus === 'done' ? 'Freed' : 'Free memory'}
-          </button>
         </div>
       </div>
     </>

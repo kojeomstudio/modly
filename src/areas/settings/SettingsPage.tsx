@@ -1,12 +1,26 @@
 import { useState } from 'react'
-import { StorageSection }      from './components/StorageSection'
-import { AboutSection }        from './components/AboutSection'
-import { LogsSection }         from './components/LogsSection'
+import { StorageSection } from './components/StorageSection'
+import { AboutSection } from './components/AboutSection'
+import { LogsSection } from './components/LogsSection'
 import { IntegrationsSection } from './components/IntegrationsSection'
+import { AgentSection } from './components/AgentSection'
+import { ApplicationSection } from './components/ApplicationSection'
+import { AccessibilitySection } from './components/AccessibilitySection'
 
-type Section = 'storage' | 'integrations' | 'logs' | 'about'
+type Section = 'application' | 'storage' | 'integrations' | 'accessibility' | 'agent' | 'logs' | 'about'
 
 const SECTIONS: { id: Section; label: string; icon: JSX.Element }[] = [
+  {
+    id: 'application',
+    label: 'Application',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14" />
+        <path d="M15.54 8.46a5 5 0 0 1 0 7.07M8.46 8.46a5 5 0 0 0 0 7.07" />
+      </svg>
+    )
+  },
   {
     id: 'storage',
     label: 'Storage',
@@ -25,6 +39,28 @@ const SECTIONS: { id: Section; label: string; icon: JSX.Element }[] = [
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
         <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
         <path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/>
+      </svg>
+    )
+  },
+  {
+    id: 'accessibility',
+    label: 'Accessibility',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <circle cx="12" cy="4" r="2" />
+        <path d="M19 9l-7 1-7-1" />
+        <path d="M12 10v6" />
+        <path d="M9 22l3-6 3 6" />
+      </svg>
+    )
+  },
+  {
+    id: 'agent',
+    label: 'Agent',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/>
+        <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/>
       </svg>
     )
   },
@@ -57,7 +93,7 @@ const SECTIONS: { id: Section; label: string; icon: JSX.Element }[] = [
 // ─── Page shell ───────────────────────────────────────────────────────────────
 
 export default function SettingsPage(): JSX.Element {
-  const [section, setSection] = useState<Section>('storage')
+  const [section, setSection] = useState<Section>('application')
 
   return (
     <div className="flex h-full">
@@ -85,10 +121,13 @@ export default function SettingsPage(): JSX.Element {
       {/* Content */}
       <div className="flex-1 overflow-y-auto bg-surface-400">
         <div className="p-8">
-          {section === 'storage'      && <StorageSection />}
-          {section === 'integrations' && <IntegrationsSection />}
-          {section === 'logs'         && <LogsSection />}
-          {section === 'about'        && <AboutSection />}
+          {section === 'application'   && <ApplicationSection />}
+          {section === 'storage'       && <StorageSection />}
+          {section === 'integrations'  && <IntegrationsSection />}
+          {section === 'accessibility' && <AccessibilitySection />}
+          {section === 'agent'         && <AgentSection />}
+          {section === 'logs'          && <LogsSection />}
+          {section === 'about'         && <AboutSection />}
         </div>
       </div>
 

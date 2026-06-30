@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Discord Chat
+    url: https://discord.gg/T7uQJWnNgr
+    about: Ask questions and chat with the Modly community in real time.
+  - name: ❤️ Sponsor Modly
+    url: https://github.com/sponsors/lightningpixel
+    about: Love Modly? Please consider supporting development via GitHub Sponsors.

@@ -10,9 +10,14 @@ import { useAppStore }         from '@shared/stores/appStore'
 import { useExtensionsStore }  from '@shared/stores/extensionsStore'
 import { useNavStore }         from '@shared/stores/navStore'
 import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
+import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
+import { validateWorkflowPreflight } from '@areas/workflows/preflight'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
+import ChatPanel from './ChatPanel'
+
+type PanelMode = 'basic' | 'chat'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -331,10 +336,7 @@ function TextParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowN
 }
 
 function WaitParamRow({ nodeId }: { nodeId: string }) {
-  const status       = useWorkflowRunStore((s) => s.runState.status)
-  const activeNodeId = useWorkflowRunStore((s) => s.activeNodeId)
-  const continueRun  = useWorkflowRunStore((s) => s.continueRun)
-  const isPaused     = status === 'paused' && activeNodeId === nodeId
+  const { waitState, canContinue, isRunning, label, buttonClass, onContinue } = useWaitButton(nodeId)
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -344,15 +346,29 @@ function WaitParamRow({ nodeId }: { nodeId: string }) {
         </svg>
         <span className="text-[11px] font-medium text-zinc-300">Wait</span>
       </div>
-      {isPaused ? (
+      {waitState ? (
         <button
-          onClick={continueRun}
-          className="w-full flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-400 hover:bg-amber-500/25 transition-colors text-[11px] font-medium animate-pulse"
+          onClick={onContinue}
+          disabled={!canContinue}
+          className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-md border transition-colors text-[11px] font-medium ${buttonClass} ${
+            canContinue ? (waitState === 'pending' ? 'animate-pulse' : '') : 'opacity-40 cursor-not-allowed'
+          }`}
         >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3"/>
-          </svg>
-          Continue
+          {isRunning ? (
+            <>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="animate-spin">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+              Running…
+            </>
+          ) : (
+            <>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3"/>
+              </svg>
+              {label}
+            </>
+          )}
         </button>
       ) : (
         <p className="text-[10px] text-zinc-600 italic px-0.5">
@@ -442,7 +458,8 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     ))
   }, [setNodes])
 
-  const { setCurrentJob } = useAppStore()
+  const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
+  const showToast = useAppStore((s) => s.showToast)
   const { runState, run, cancel } = useWorkflowRunStore()
   const isRunning = runState.status === 'running' || runState.status === 'paused'
 
@@ -453,33 +470,12 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     if (out) updateNodeData(out.id, { params: { outputUrl: runState.outputUrl } })
   }, [runState.status, runState.outputUrl])
 
-  // Type mismatch detection — edge-based to support multi-input nodes
-  const typeMismatch = useMemo(() => {
-    // Build a map of what type each node produces
-    const nodeOutput = new Map<string, string>()
-    for (const node of workflow.nodes) {
-      if (node.type === 'imageNode')  { nodeOutput.set(node.id, 'image'); continue }
-      if (node.type === 'meshNode')   { nodeOutput.set(node.id, 'mesh');  continue }
-      if (node.type === 'textNode')   { nodeOutput.set(node.id, 'text');  continue }
-      if (node.type === 'extensionNode') {
-        const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
-        if (ext) nodeOutput.set(node.id, ext.output)
-      }
-    }
-    // For each extension node, check that every incoming edge carries an accepted type
-    const extNodes = workflow.nodes.filter((n) => n.type === 'extensionNode')
-    for (const node of extNodes) {
-      const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
-      if (!ext) continue
-      const accepted = ext.inputs ?? [ext.input]
-      for (const edge of workflow.edges) {
-        if (edge.target !== node.id) continue
-        const srcType = nodeOutput.get(edge.source)
-        if (srcType && !accepted.includes(srcType as any)) return true
-      }
-    }
-    return false
-  }, [workflow, allExtensions])
+  const preflightIssues = useMemo(() => {
+    const wf: Workflow = { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[] }
+    return validateWorkflowPreflight(wf, allExtensions, { currentMeshUrl })
+  }, [workflow, nodes, edges, allExtensions, currentMeshUrl])
+
+  const firstPreflightIssue = preflightIssues[0]?.message ?? null
 
   // Ordered nodes for params list — only those marked showInGenerate
   const sortedNodes = useMemo(
@@ -493,9 +489,13 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   )
 
   const handleGenerate = useCallback(() => {
+    if (firstPreflightIssue) {
+      showToast(firstPreflightIssue)
+      return
+    }
     const wf: Workflow = { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[] }
     run(wf, allExtensions)
-  }, [nodes, edges, workflow, allExtensions, run])
+  }, [firstPreflightIssue, nodes, edges, workflow, allExtensions, run, showToast])
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -542,13 +542,13 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
 
       {/* Footer */}
       <div className="shrink-0 px-4 pt-3 pb-4 border-t border-zinc-800 flex flex-col gap-2">
-        {typeMismatch && !isRunning && (
-          <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-red-950/40 border border-red-800/50">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400 shrink-0">
+        {firstPreflightIssue && !isRunning && (
+          <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-amber-950/40 border border-amber-800/50">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-300 shrink-0">
               <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
               <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
             </svg>
-            <span className="text-[10px] text-red-400 font-medium">Type mismatch — fix the workflow</span>
+            <span className="text-[10px] text-amber-300 font-medium">{firstPreflightIssue}</span>
           </div>
         )}
         {isRunning ? (
@@ -557,11 +557,35 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
             Stop
           </button>
         ) : (
-          <button onClick={handleGenerate} disabled={typeMismatch}
+          <button onClick={handleGenerate} disabled={Boolean(firstPreflightIssue)}
             className="w-full py-2.5 rounded-lg text-sm font-semibold bg-accent hover:bg-accent-dark disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors">
             Generate 3D Model
           </button>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ─── Mode toggle ──────────────────────────────────────────────────────────────
+
+function ModeToggle({ mode, onChange }: { mode: PanelMode; onChange: (m: PanelMode) => void }): JSX.Element {
+  return (
+    <div className="shrink-0 px-3 pt-3 pb-2.5">
+      <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
+        {(['basic', 'chat'] as PanelMode[]).map((m) => (
+          <button
+            key={m}
+            onClick={() => onChange(m)}
+            className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors capitalize ${
+              mode === m
+                ? 'bg-zinc-700 text-zinc-100 shadow-sm'
+                : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            {m}
+          </button>
+        ))}
       </div>
     </div>
   )
@@ -575,6 +599,7 @@ export default function WorkflowPanel() {
   const loadExtensions         = useExtensionsStore((s) => s.loadExtensions)
   const { navigate }           = useNavStore()
   const [selectedId, setSelectedId] = useState<string | null>(activeId)
+  const [mode, setMode]             = useState<PanelMode>('basic')
 
   const allExtensions = useMemo(
     () => buildAllWorkflowExtensions(modelExtensions, processExtensions),
@@ -597,44 +622,56 @@ export default function WorkflowPanel() {
   return (
     <div className="flex flex-col flex-1 min-h-0">
 
-      {/* Header */}
-      <div className="shrink-0 px-4 pt-3 pb-3 border-b border-zinc-800 flex flex-col gap-3">
-        <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Workflow</h2>
-        <div className="flex items-center gap-2">
-          <div className="flex-1 min-w-0">
-            <WorkflowDropdown workflows={workflows} value={selectedId} onChange={setSelectedId} />
-          </div>
-          {selectedId && (
-            <button
-              onClick={() => { useWorkflowsStore.getState().setActive(selectedId!); navigate('workflows') }}
-              title="Edit workflow"
-              className="shrink-0 p-1.5 rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-400
-                         hover:text-zinc-100 hover:bg-zinc-700 hover:border-zinc-600 transition-colors"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-              </svg>
-            </button>
-          )}
-        </div>
-      </div>
+      {/* Mode toggle */}
+      <ModeToggle mode={mode} onChange={setMode} />
 
-      {/* Canvas or empty state */}
-      {workflow ? (
-        <ReactFlowProvider>
-          <EmbeddedCanvas
-            key={workflow.id + workflow.updatedAt}
-            workflow={workflow}
-            allExtensions={allExtensions}
-          />
-        </ReactFlowProvider>
+      {mode === 'chat' ? (
+        <>
+          <div className="shrink-0 h-px bg-zinc-800" />
+          <ChatPanel />
+        </>
       ) : (
-        <div className="flex-1 flex items-center justify-center px-6">
-          <p className="text-xs text-zinc-600 text-center leading-relaxed">
-            No workflows yet.<br/>Create one in the Workflows tab.
-          </p>
-        </div>
+        <>
+          {/* Header */}
+          <div className="shrink-0 px-4 pt-2.5 pb-3 border-b border-zinc-800 flex flex-col gap-3">
+            <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Workflow</h2>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <WorkflowDropdown workflows={workflows} value={selectedId} onChange={setSelectedId} />
+              </div>
+              {selectedId && (
+                <button
+                  onClick={() => { useWorkflowsStore.getState().setActive(selectedId!); navigate('workflows') }}
+                  title="Edit workflow"
+                  className="shrink-0 p-1.5 rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-400
+                             hover:text-zinc-100 hover:bg-zinc-700 hover:border-zinc-600 transition-colors"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                  </svg>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Canvas or empty state */}
+          {workflow ? (
+            <ReactFlowProvider>
+              <EmbeddedCanvas
+                key={workflow.id + workflow.updatedAt}
+                workflow={workflow}
+                allExtensions={allExtensions}
+              />
+            </ReactFlowProvider>
+          ) : (
+            <div className="flex-1 flex items-center justify-center px-6">
+              <p className="text-xs text-zinc-600 text-center leading-relaxed">
+                No workflows yet.<br/>Create one in the Workflows tab.
+              </p>
+            </div>
+          )}
+        </>
       )}
     </div>
   )

@@ -1,12 +1,15 @@
-import { useEffect, useState } from 'react'
-import { useAppStore } from '@shared/stores/appStore'
+import { useEffect, useLayoutEffect, useState } from 'react'
+import { useAppStore, type UiScale } from '@shared/stores/appStore'
 import FirstRunSetup from '@areas/setup/FirstRunSetup'
 import MainLayout from '@shared/components/layout/MainLayout'
 import { UpdateModal } from '@shared/components/ui/UpdateModal'
 import { ErrorModal } from '@shared/components/ui/ErrorModal'
+import { Toast } from '@shared/components/ui/Toast'
+
+const UI_SCALE_FACTORS: Record<UiScale, number> = { small: 0.875, medium: 1, large: 1.25 }
 
 export default function App(): JSX.Element {
-  const { checkSetup, setupStatus, initApp, backendStatus, showError } = useAppStore()
+  const { checkSetup, setupStatus, initApp, backendStatus, showError, useAtkinsonFont, uiScale } = useAppStore()
   const [updateVersion, setUpdateVersion] = useState<string | null>(null)
   const [currentVersion, setCurrentVersion] = useState<string>('')
 
@@ -21,6 +24,17 @@ export default function App(): JSX.Element {
       window.electron.updater.offMajorMinorAvailable()
     }
   }, [])
+
+  // Apply before paint to avoid a flash of default font/size on launch.
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty(
+      '--app-font',
+      useAtkinsonFont
+        ? "'Atkinson Hyperlegible', system-ui, sans-serif"
+        : "'Inter', system-ui, sans-serif"
+    )
+    window.electron.ui.setZoomFactor(UI_SCALE_FACTORS[uiScale])
+  }, [useAtkinsonFont, uiScale])
 
   useEffect(() => {
     if (setupStatus === 'done') initApp()
@@ -41,12 +55,14 @@ export default function App(): JSX.Element {
           onDismiss={() => setUpdateVersion(null)}
         />
       )}
+      <Toast />
       <ErrorModal />
     </>
   )
   return (
     <>
       <FirstRunSetup />
+      <Toast />
       <ErrorModal />
     </>
   )

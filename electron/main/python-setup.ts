@@ -1,5 +1,6 @@
 import { BrowserWindow, app } from 'electron'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { cp, rm, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { spawn, execSync } from 'child_process'
 import { createHash } from 'crypto'
@@ -150,13 +151,46 @@ export function markSetupDone(userData: string): void {
   )
 }
 
+// ─── AppImage: stable Python runtime ─────────────────────────────────────────
+
+/**
+ * On Linux AppImage, process.resourcesPath resolves to an ephemeral mount point
+ * (/tmp/.mount_Modly-XXXXXX/) that changes every launch, which breaks venv symlinks.
+ * This copies the bundled Python runtime to a stable userData path once per app version.
+ */
+async function ensureStableEmbeddedPython(userData: string, win: BrowserWindow): Promise<string> {
+  const stableDir = join(userData, 'python-embed')
+  const stableExe = join(stableDir, 'bin', 'python3')
+  const versionFile = join(stableDir, '.app-version')
+  const currentVersion = app.getVersion()
+
+  const alreadyCopied =
+    existsSync(stableExe) &&
+    existsSync(versionFile) &&
+    readFileSync(versionFile, 'utf-8').trim() === currentVersion
+
+  if (!alreadyCopied) {
+    win.webContents.send('setup:progress', { step: 'venv', percent: 2 })
+    console.log('[PythonSetup] Extracting Python runtime to stable path:', stableDir)
+    if (existsSync(stableDir)) {
+      await rm(stableDir, { recursive: true, force: true })
+    }
+    await mkdir(stableDir, { recursive: true })
+    await cp(getEmbeddedPythonDir(), stableDir, { recursive: true, preserveTimestamps: true })
+    writeFileSync(versionFile, currentVersion, 'utf-8')
+    console.log('[PythonSetup] Python runtime ready at:', stableDir)
+  }
+
+  return stableExe
+}
+
 // ─── Setup steps ─────────────────────────────────────────────────────────────
 
 function createVenv(pythonExe: string, venvDir: string, win: BrowserWindow): Promise<void> {
   return new Promise((resolve, reject) => {
     win.webContents.send('setup:progress', { step: 'venv', percent: 5 })
     console.log('[PythonSetup] Creating venv at', venvDir)
-    const proc = spawn(pythonExe, ['-m', 'venv', venvDir], {
+    const proc = spawn(pythonExe, ['-m', 'venv', '--clear', venvDir], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanPythonEnv(),
     })
@@ -263,10 +297,14 @@ export async function runFullSetup(win: BrowserWindow, userData: string): Promis
     const requirementsPath = getRequirementsPath()
     const venvDir = getVenvDir(userData)
 
-    if (process.platform === 'win32' || app.isPackaged) {
-      // Packaged (all platforms) + Windows dev: use bundled python-build-standalone.
-      // python-build-standalone is a full Python install → venv module works natively,
-      // DLLs come from the installer so SAC doesn't block them.
+    if (process.platform === 'linux' && app.isPackaged) {
+      // AppImage: process.resourcesPath is ephemeral — copy Python to stable userData path first
+      const pythonExe = await ensureStableEmbeddedPython(userData, win)
+      await createVenv(pythonExe, venvDir, win)
+      const venvPython = getVenvPythonExe(userData)
+      await installRequirements(venvPython, requirementsPath, win)
+    } else if (process.platform === 'win32' || app.isPackaged) {
+      // Windows (dev + packaged) or macOS packaged: bundled Python path is stable
       const pythonExe = getEmbeddedPythonExe()
       if (!existsSync(pythonExe)) {
         throw new Error(

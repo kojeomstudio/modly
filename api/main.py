@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi import HTTPException
 
-from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs
+from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs, agent
 from services.auth import TokenAuthMiddleware
 
 
@@ -32,7 +32,7 @@ logging.getLogger("uvicorn.access").addFilter(_StatusFilter())
 
 app = FastAPI(
     title="Modly API",
-    version="0.3.6",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -49,6 +49,9 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    # drei's SplatLoader reads Content-Length to size its buffers; cross-origin
+    # JS can only see it when the server explicitly exposes the header.
+    expose_headers=["Content-Length"],
 )
 
 app.include_router(status.router)
@@ -59,6 +62,7 @@ app.include_router(optimize.router,    prefix="/optimize")
 app.include_router(extensions.router, prefix="/extensions")
 app.include_router(export.router,          prefix="/export")
 app.include_router(workflow_runs.router,   prefix="/workflow-runs")
+app.include_router(agent.router)
 
 # Serve generated files from workspace — dynamic so path changes take effect immediately
 @app.get("/workspace/{full_path:path}")

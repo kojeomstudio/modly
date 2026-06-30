@@ -43,6 +43,22 @@ function createWindow(): void {
   // Restrict window.open / target=_blank to safe web/mail schemes only.
   // Mirrors the allowlist applied to ipcMain shell:openExternal.
   const ALLOWED_OPEN_SCHEMES = new Set(['http:', 'https:', 'mailto:'])
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    const isMacQuitShortcut =
+      process.platform === 'darwin' &&
+      input.type === 'keyDown' &&
+      input.key.toLowerCase() === 'q' &&
+      input.meta &&
+      !input.control &&
+      !input.alt
+
+    if (isMacQuitShortcut) {
+      event.preventDefault()
+      app.quit()
+    }
+  })
+
   mainWindow.webContents.setWindowOpenHandler((details) => {
     try {
       const scheme = new URL(details.url).protocol
@@ -105,7 +121,10 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  // Modly holds a multi-GB Python subprocess; leaving it running in the
+  // Dock after the window closes (the Mac default) is the wrong behavior
+  // for this app. Closing the window means quit.
+  app.quit()
 })
 
 app.on('before-quit', (event) => {

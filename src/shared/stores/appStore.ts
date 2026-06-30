@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import axios from 'axios'
 
+export type UiScale = 'small' | 'medium' | 'large'
 export type BackendStatus = 'not_started' | 'starting' | 'ready' | 'error'
 export type SetupStatus = 'idle' | 'checking' | 'needed' | 'installing' | 'done' | 'error'
 export interface SetupProgress { step: string; percent: number; currentPackage?: string }
@@ -37,12 +38,40 @@ export interface GenerationOptions {
   modelParams: Record<string, any>
 }
 
+export interface LightSettings {
+  mainIntensity: number
+  mainColor: string
+  fillIntensity: number
+  fillColor: string
+  ambientIntensity: number
+  envIntensity: number
+}
+
+export interface AppToast {
+  id: number
+  message: string
+  durationMs?: number
+}
+
 const DEFAULT_OPTIONS: GenerationOptions = {
   modelId: '',
   remesh: 'quad',
   enableTexture: false,
   textureResolution: 512,
   modelParams: {},
+}
+
+export const DEFAULT_LIGHT_SETTINGS: LightSettings = {
+  // Matches the offline debug renderer's flat studio rig: two soft directional
+  // lights (key ~0.8 / fill ~0.35) + high ambient (0.45) that lifts dark albedo
+  // (black cat) out of "void" shadows, NO IBL (envIntensity 0).
+  // All live-adjustable from the Lighting popover (Reset returns here).
+  mainIntensity: 0.8,
+  mainColor: '#ffffff',
+  fillIntensity: 0.35,
+  fillColor: '#ffffff',
+  ambientIntensity: 0.45,
+  envIntensity: 0.0,
 }
 
 interface AppState {
@@ -70,11 +99,17 @@ interface AppState {
   meshStats: { vertices: number; triangles: number } | null
   setMeshStats: (stats: { vertices: number; triangles: number } | null) => void
 
+  // Mesh selection (set by Viewer3D click, read by the Generate tools bar)
+  meshSelected: boolean
+  setMeshSelected: (selected: boolean) => void
+
   // Setup
   setupStatus:    SetupStatus
   setupProgress:  SetupProgress | null
   setupError:     string | null
   defaultDataDir: string
+  platform: string
+  arch: string
   checkSetup:     () => Promise<void>
   runSetup:       () => Promise<void>
   saveDataDir:    (baseDir: string) => Promise<void>
@@ -88,6 +123,11 @@ interface AppState {
   showError: (message: string) => void
   hideError: () => void
 
+  // Toast
+  toast: AppToast | null
+  showToast: (message: string, durationMs?: number) => void
+  hideToast: () => void
+
   // Mesh URL history (undo/redo)
   meshHistory: string[]
   historyIndex: number
@@ -95,6 +135,20 @@ interface AppState {
   undoMesh: () => void
   redoMesh: () => void
   clearMeshHistory: () => void
+
+  // UI preferences
+  showRamIndicator: boolean
+  setShowRamIndicator: (v: boolean) => void
+
+  // Accessibility
+  useAtkinsonFont: boolean
+  setUseAtkinsonFont: (v: boolean) => void
+  uiScale: UiScale
+  setUiScale: (v: UiScale) => void
+
+  // 3D viewer lighting
+  lightSettings: LightSettings
+  setLightSettings: (settings: LightSettings) => void
 
   // Actions
   initApp: () => Promise<void>
@@ -115,11 +169,13 @@ export const useAppStore = create<AppState>()(
       setupProgress: null,
       setupError: null,
       defaultDataDir: '',
+      platform: '',
+      arch: '',
 
       checkSetup: async () => {
         set({ setupStatus: 'checking' })
-        const { needed, defaultDataDir } = await window.electron.setup.check()
-        set({ setupStatus: needed ? 'needed' : 'done', defaultDataDir })
+        const { needed, defaultDataDir, platform, arch } = await window.electron.setup.check()
+        set({ setupStatus: needed ? 'needed' : 'done', defaultDataDir, platform, arch })
       },
 
       saveDataDir: async (baseDir: string) => {
@@ -155,6 +211,10 @@ export const useAppStore = create<AppState>()(
       showError: (message) => set({ errorModal: message }),
       hideError: () => set({ errorModal: null }),
 
+      toast: null,
+      showToast: (message, durationMs) => set({ toast: { id: Date.now(), message, durationMs } }),
+      hideToast: () => set({ toast: null }),
+
       meshHistory: [],
       historyIndex: -1,
 
@@ -182,6 +242,17 @@ export const useAppStore = create<AppState>()(
 
       clearMeshHistory: () => set({ meshHistory: [], historyIndex: -1 }),
 
+      showRamIndicator: true,
+      setShowRamIndicator: (v) => set({ showRamIndicator: v }),
+
+      useAtkinsonFont: false,
+      setUseAtkinsonFont: (v) => set({ useAtkinsonFont: v }),
+      uiScale: 'medium',
+      setUiScale: (v) => set({ uiScale: v }),
+
+      lightSettings: DEFAULT_LIGHT_SETTINGS,
+      setLightSettings: (settings) => set({ lightSettings: settings }),
+
       currentJob: null,
       selectedImagePath: null,
       setSelectedImagePath: (path) => set({ selectedImagePath: path }),
@@ -192,6 +263,8 @@ export const useAppStore = create<AppState>()(
       generationOptions: DEFAULT_OPTIONS,
       meshStats: null,
       setMeshStats: (stats) => set({ meshStats: stats }),
+      meshSelected: false,
+      setMeshSelected: (selected) => set({ meshSelected: selected }),
       initApp: async () => {
         set({ backendStatus: 'starting', backendError: null })
 
@@ -246,6 +319,10 @@ export const useAppStore = create<AppState>()(
       name: 'modly-store',
       partialize: (state) => ({
         generationOptions: state.generationOptions,
+        showRamIndicator: state.showRamIndicator,
+        useAtkinsonFont: state.useAtkinsonFont,
+        uiScale: state.uiScale,
+        lightSettings: state.lightSettings,
       }),
     }
   )

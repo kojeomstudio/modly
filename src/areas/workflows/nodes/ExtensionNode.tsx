@@ -127,8 +127,8 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
   const [handle2Top, setHandle2Top] = useState('50%')
 
   const { modelExtensions, processExtensions } = useExtensionsStore()
-  const ext = buildAllWorkflowExtensions(modelExtensions, processExtensions)
-    .find((e) => e.id === data.extensionId)
+  const allExtensions = buildAllWorkflowExtensions(modelExtensions, processExtensions)
+  const ext = allExtensions.find((e) => e.id === data.extensionId)
 
   const inputs      = ext?.inputs  // defined → multi-input mode
   const isMulti     = inputs && inputs.length > 1

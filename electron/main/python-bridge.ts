@@ -184,7 +184,13 @@ export class PythonBridge {
         // theory, but reliable. Override at launch time if you want to
         // re-enable it for a specific debug session.
         HF_HUB_DISABLE_XET:        process.env['HF_HUB_DISABLE_XET'] ?? '1',
-      }
+      },
+      // On Unix, put the bridge in its own process group so every subprocess
+      // it spawns (extension runners, etc.) inherits that group. On shutdown
+      // we SIGKILL the whole group (negative PID) to take them all out
+      // together — otherwise children get reparented to launchd and keep
+      // holding MPS-wired memory until the user kills them manually.
+      detached: process.platform !== 'win32',
     })
 
     this.process.stdout?.on('data', (data) => {
@@ -207,7 +213,13 @@ export class PythonBridge {
       this.ready = false
       this.process = null
       if (wasReady && !this.intentionalStop) {
-        this.getWindow?.()?.webContents.send('python:crashed', { code })
+        const getWindow = this.getWindow
+        if (!getWindow) return
+        const win = getWindow()
+        const contents = win?.webContents
+        if (contents && !contents.isDestroyed()) {
+          contents.send('python:crashed', { code })
+        }
       }
     })
 
@@ -222,8 +234,17 @@ export class PythonBridge {
     if (process.platform === 'win32') {
       const { execSync } = require('child_process')
       try { execSync(`taskkill /PID ${proc.pid} /T /F`) } catch {}
-    } else {
-      proc.kill('SIGTERM')
+    } else if (proc.pid) {
+      // Kill the entire process group (negative PID) so extension subprocesses
+      // die with the bridge instead of being orphaned to launchd. SIGKILL
+      // rather than SIGTERM: on app quit we want immediate release of Metal
+      // wired memory, not a polite request the subprocess might ignore while
+      // it finishes an operation.
+      try {
+        process.kill(-proc.pid, 'SIGKILL')
+      } catch {
+        try { proc.kill('SIGKILL') } catch {}
+      }
     }
     console.log('[PythonBridge] Stopped')
   }
@@ -239,7 +260,13 @@ export class PythonBridge {
   private emitTqdmLog(raw: string): void {
     if (/INFO/.test(raw)) return
     if (!raw.trim()) return
-    this.getWindow?.()?.webContents.send('python:log', raw.trim())
+    const getWindow = this.getWindow
+    if (!getWindow) return
+    const win = getWindow()
+    const contents = win?.webContents
+    if (contents && !contents.isDestroyed()) {
+      contents.send('python:log', raw.trim())
+    }
   }
 
   isReady(): boolean { return this.ready }

@@ -2,10 +2,12 @@ import { ipcMain, BrowserWindow, dialog, app, shell } from 'electron'
 import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
-import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp } from 'fs/promises'
+import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat } from 'fs/promises'
 import { existsSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
 import * as tar from 'tar'
+import * as os from 'os'
+import { promisify } from 'util'
 import { PythonBridge, API_BASE_URL } from './python-bridge'
 import {
   isModelDownloaded,
@@ -17,17 +19,28 @@ import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensure
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
-import { spawn } from 'child_process'
+import { spawn, execFile } from 'child_process'
 import vendoredTrustedExtensions from './trusted-extensions.json'
 import { assertSafeExtensionId, buildExtensionBackupPath, resolveExtensionPathWithinRoot } from './extension-path-guard'
+import { isSetupFailureFatal, validateInstallManifest } from './extension-install-utils'
+import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 
 type WindowGetter = () => BrowserWindow | null
+const pExecFile = promisify(execFile)
 
 // ─── GPU detect (best-effort, no Python required) ─────────────────────────────
 
-interface GpuInfo { sm: number; cudaVersion: number }
+interface GpuInfo {
+  sm: number
+  cudaVersion: number
+  accelerator: 'cuda' | 'mps' | 'cpu'
+}
 
 function detectGpuInfo(): Promise<GpuInfo> {
+  if (process.platform === 'darwin' && process.arch === 'arm64') {
+    return Promise.resolve({ sm: 0, cudaVersion: 0, accelerator: 'mps' })
+  }
+
   return new Promise((resolve) => {
     // Query compute cap + driver version in one call
     const proc = spawn('nvidia-smi', ['--query-gpu=compute_cap,driver_version', '--format=csv,noheader'], {
@@ -54,12 +67,12 @@ function detectGpuInfo(): Promise<GpuInfo> {
         else if (driverMajor >= 530) cudaVersion = 121
         else if (driverMajor >= 525) cudaVersion = 120
         else if (driverMajor >= 520) cudaVersion = 118
-        resolve({ sm: isNaN(sm) ? 86 : sm, cudaVersion })
+        resolve({ sm: isNaN(sm) ? 86 : sm, cudaVersion, accelerator: 'cuda' })
       } else {
-        resolve({ sm: 86, cudaVersion: 118 })
+        resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' })
       }
     })
-    proc.on('error', () => resolve({ sm: 86, cudaVersion: 118 }))
+    proc.on('error', () => resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' }))
   })
 }
 
@@ -77,8 +90,92 @@ function runExtensionSetup(
     const pythonExe = getVenvPythonExe(userData)
     const setupPy   = join(extDir, 'setup.py')
 
-    const args = JSON.stringify({ python_exe: pythonExe, ext_dir: extDir, gpu_sm: gpuSm, cuda_version: cudaVersion })
-    const proc = spawn(pythonExe, [setupPy, args], {
+    const accelerator = process.platform === 'darwin' && process.arch === 'arm64' ? 'mps' : gpuSm > 0 ? 'cuda' : 'cpu'
+    const args = JSON.stringify({
+      python_exe: pythonExe,
+      ext_dir: extDir,
+      gpu_sm: gpuSm,
+      cuda_version: cudaVersion,
+      accelerator,
+      platform: process.platform,
+      arch: process.arch,
+    })
+    const launcher = `
+import runpy
+import subprocess
+import sys
+
+setup_py = sys.argv[1]
+setup_args = sys.argv[2:]
+
+_original_run = subprocess.run
+_original_check_call = subprocess.check_call
+_original_check_output = subprocess.check_output
+
+def _is_cuda_torch_index(value):
+    return isinstance(value, str) and value.startswith("https://download.pytorch.org/whl/cu")
+
+def _mentions_torch(command):
+    if not isinstance(command, (list, tuple)):
+        return False
+    return any(str(part).startswith(("torch==", "torchvision==", "torchaudio==")) for part in command)
+
+def _rewrite_command(command):
+    if sys.platform != "darwin" or not _mentions_torch(command):
+        return command
+    if not isinstance(command, (list, tuple)):
+        return command
+
+    rewritten = []
+    changed = False
+    i = 0
+    while i < len(command):
+        part = command[i]
+        text = str(part)
+        if text in ("--index-url", "-i", "--extra-index-url") and i + 1 < len(command) and _is_cuda_torch_index(str(command[i + 1])):
+            changed = True
+            i += 2
+            continue
+        if text.startswith("--index-url=") or text.startswith("--extra-index-url="):
+            value = text.split("=", 1)[1]
+            if _is_cuda_torch_index(value):
+                changed = True
+                i += 1
+                continue
+        rewritten.append(part)
+        i += 1
+
+    if changed:
+        print("[Modly setup compat] Removed CUDA-only PyTorch index on macOS; pip will use macOS wheels.", file=sys.stderr)
+        return rewritten
+    return command
+
+def _patched_run(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _rewrite_command(args[0])
+    return _original_run(*args, **kwargs)
+
+def _patched_check_call(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _rewrite_command(args[0])
+    return _original_check_call(*args, **kwargs)
+
+def _patched_check_output(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _rewrite_command(args[0])
+    return _original_check_output(*args, **kwargs)
+
+subprocess.run = _patched_run
+subprocess.check_call = _patched_check_call
+subprocess.check_output = _patched_check_output
+
+sys.argv = [setup_py] + setup_args
+runpy.run_path(setup_py, run_name="__main__")
+`
+    const proc = spawn(pythonExe, ['-c', launcher, setupPy, args], {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -146,7 +243,12 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('setup:check', async () => {
     const userData = app.getPath('userData')
     const defaultDataDir = join(app.getPath('documents'), 'Modly')
-    return { needed: checkSetupNeeded(userData), defaultDataDir }
+    return {
+      needed: checkSetupNeeded(userData),
+      defaultDataDir,
+      platform: process.platform,
+      arch: process.arch,
+    }
   })
 
   ipcMain.handle('setup:saveDataDir', async (_event, { baseDir }: { baseDir: string }) => {
@@ -208,7 +310,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
     const result = await dialog.showOpenDialog(win, {
       title: 'Select a 3D mesh file',
-      filters: [{ name: '3D Mesh', extensions: ['glb', 'obj', 'stl', 'ply'] }],
+      filters: [{ name: '3D Mesh', extensions: ['glb', 'obj', 'stl', 'ply', 'splat'] }],
       properties: ['openFile']
     })
 
@@ -254,17 +356,39 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:delete', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
+
+    // Unload the model and wait for confirmation so file handles are released
     try {
-      await axios.post(`${API_BASE_URL}/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 5000 })
+      await axios.post(`${API_BASE_URL}/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 10_000 })
+      // Give the OS a moment to release file locks (Windows holds handles briefly after close)
+      await new Promise(resolve => setTimeout(resolve, 1_500))
     } catch {
-      // unload is best-effort — proceed with deletion anyway
+      // Unload failed (model may not be loaded) — still attempt deletion
     }
-    try {
-      await rmAsync(modelDir, { recursive: true, force: true })
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
+
+    // Retry removal — Windows may return EBUSY/EPERM if handles linger
+    const maxRetries = 3
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await rmAsync(modelDir, { recursive: true, force: true })
+        return { success: true }
+      } catch (err: unknown) {
+        const code = (err as NodeJS.ErrnoException).code
+        const isLocked = code === 'EBUSY' || code === 'EPERM'
+        if (isLocked && attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 1_000 * attempt))
+          continue
+        }
+        return {
+          success: false,
+          error: isLocked
+            ? `Model files are still locked after ${maxRetries} attempts. Close any programs using the model and try again.`
+            : String(err),
+        }
+      }
     }
+
+    return { success: false, error: 'Unexpected error during deletion' }
   })
 
   ipcMain.handle('model:showInFolder', (_, modelId: string) => {
@@ -276,6 +400,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   // Read local file → base64 (bypasses file:// restrictions in the renderer)
   ipcMain.handle('fs:readFileBase64', async (_, filePath: string) => {
+    if (typeof filePath !== 'string' || filePath.trim().length === 0) {
+      throw new Error('fs:readFileBase64 requires a non-empty file path')
+    }
     const buffer = await readFile(filePath)
     return buffer.toString('base64')
   })
@@ -294,16 +421,19 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return listDownloadedModels(modelsDir)
   })
 
-  ipcMain.handle('model:isDownloaded', (_, modelId: string): boolean => {
+  ipcMain.handle('model:isDownloaded', (_, modelId: string, downloadCheck?: string): boolean => {
     const modelsDir = getSettings(app.getPath('userData')).modelsDir
-    return isModelDownloaded(modelsDir, modelId)
+    return isModelDownloaded(modelsDir, modelId, downloadCheck)
   })
 
   ipcMain.handle('model:activeDownloads', () =>
     [...activeDownloads.entries()].map(([modelId, progress]) => ({ modelId, ...progress }))
   )
 
-  ipcMain.handle('model:download', async (event, { repoId, modelId, skipPrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[] }) => {
+  ipcMain.handle('model:download', async (
+    event,
+    { repoId, modelId, skipPrefixes, includePrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[]; includePrefixes?: string[] },
+  ) => {
     // Refuse downloads for extensions whose manifest declares them
     // incompatible with the current platform. The download itself would
     // succeed (it's just file transfer) but inference can't run, so the
@@ -330,12 +460,52 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       logger.warn(`[model:download] compatibility check failed for ${modelId}: ${err}`)
     }
 
+    if (activeDownloads.has(modelId)) {
+      return { success: false, error: 'Download already in progress' }
+    }
     activeDownloads.set(modelId, { percent: 0 })
     try {
       await downloadModelFromHF(repoId, modelId, (progress) => {
         activeDownloads.set(modelId, progress)
         event.sender.send('model:downloadProgress', { modelId, ...progress })
-      }, skipPrefixes, pythonBridge.getApiToken())
+      }, skipPrefixes, pythonBridge.getApiToken(), includePrefixes)
+      return { success: true }
+    } catch (err: any) {
+      const message = err?.message ?? String(err)
+      if (message.includes('paused')) {
+        event.sender.send('model:downloadProgress', { modelId, percent: 0, status: 'paused', paused: true })
+        return { success: false, paused: true }
+      }
+      if (message.includes('cancelled')) {
+        event.sender.send('model:downloadProgress', { modelId, percent: 0, status: 'cancelled', cancelled: true })
+        return { success: false, cancelled: true }
+      }
+      return { success: false, error: String(err) }
+    } finally {
+      activeDownloads.delete(modelId)
+    }
+  })
+
+  ipcMain.handle('model:pauseDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      await axios.post(`${API_BASE_URL}/model/hf-download/pause`, null, {
+        params: { model_id: modelId },
+        timeout: 5000,
+      })
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('model:cancelDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
+        params: { model_id: modelId },
+        timeout: 5000,
+      })
+      const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
+      await rmAsync(modelDir, { recursive: true, force: true })
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -390,12 +560,47 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // App info
+  // System memory (used/available/total bytes).
+  // On macOS, matches Activity Monitor's "Memory Used":
+  //     used = wired + active + compressed.
+  ipcMain.handle('system:memory', async () => {
+    const total = os.totalmem()
+
+    if (process.platform === 'darwin') {
+      try {
+        const { stdout } = await pExecFile('vm_stat', [])
+        const pageSizeMatch = stdout.match(/page size of (\d+) bytes/)
+        const pageSize = pageSizeMatch ? parseInt(pageSizeMatch[1]!, 10) : 16384
+
+        const pagesFor = (label: string): number => {
+          const m = stdout.match(new RegExp(`${label}:\\s+(\\d+)`))
+          return m ? parseInt(m[1]!, 10) : 0
+        }
+
+        const active = pagesFor('Pages active')
+        const wired = pagesFor('Pages wired down')
+        const compressed = pagesFor('Pages occupied by compressor')
+
+        const used = (active + wired + compressed) * pageSize
+        const available = Math.max(0, total - used)
+        return { total, used, available }
+      } catch {
+        // Fall back to total - free outside Activity Monitor semantics.
+      }
+    }
+
+    const free = os.freemem()
+    return { total, used: total - free, available: free }
+  })
+
   ipcMain.handle('app:info', () => ({
     version:   app.getVersion(),
     userData:  app.getPath('userData'),
     modelsDir: getSettings(app.getPath('userData')).modelsDir,
     apiUrl:    API_BASE_URL,
     apiToken:  pythonBridge.getApiToken(),
+    platform:  process.platform,
+    arch:      process.arch,
   }))
 
   // Settings — seed HF token into main-process env at startup
@@ -428,11 +633,12 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Directory picker
-  ipcMain.handle('fs:selectDirectory', async () => {
+  ipcMain.handle('fs:selectDirectory', async (_event, defaultPath?: string) => {
     const win = getWindow()
     if (!win) return null
     const result = await dialog.showOpenDialog(win, {
       properties: ['openDirectory', 'createDirectory'],
+      ...(defaultPath && { defaultPath }),
     })
     return result.canceled ? null : result.filePaths[0]
   })
@@ -457,6 +663,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Workspace filesystem-based persistence
   const workspacePath = (...parts: string[]) =>
     join(getSettings(app.getPath('userData')).workspaceDir, ...parts)
+
+  registerWorkspaceAssetLibraryIpcHandlers({
+    ipcMain,
+    getWorkspaceDir: () => getSettings(app.getPath('userData')).workspaceDir,
+  })
 
   ipcMain.handle('workspace:listCollections', async () => {
     const base = workspacePath()
@@ -590,6 +801,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     // extension type
     type?:  'model' | 'process'
     entry?: string
+    // Optional top-level fallbacks — applied to each node if not set on the node
+    params_schema?:  unknown[]
+    param_defaults?: Record<string, unknown>
     nodes?: {
       id:                string
       name?:             string
@@ -597,9 +811,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       inputs?:           ('mesh' | 'image' | 'text')[]
       output?:           'mesh' | 'image' | 'text'
       params_schema?:    unknown[]
+      param_defaults?:   Record<string, unknown>
       hf_repo?:          string
       download_check?:   string
       hf_skip_prefixes?: string[]
+      hf_include_prefixes?: string[]
     }[]
     compatibility?: {
       platforms?: ('win32' | 'linux' | 'darwin')[]
@@ -631,10 +847,12 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       input:          n.input  ?? 'image' as const,
       inputs:         n.inputs,
       output:         n.output ?? 'mesh'  as const,
-      paramsSchema:   n.params_schema ?? [],
+      paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
+      paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
       hfRepo:         n.hf_repo,
       downloadCheck:  n.download_check,
       hfSkipPrefixes: n.hf_skip_prefixes,
+      hfIncludePrefixes: n.hf_include_prefixes,
     }))
 
     if (parsed.type === 'process') {
@@ -656,15 +874,38 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       if (!existsSync(dir)) return []
       try {
         const entries = await readdir(dir, { withFileTypes: true })
-        const dirs    = entries.filter(e => e.isDirectory())
+        // On Windows, junction points are reported by Node.js as isSymbolicLink()=true,
+        // isDirectory()=false. Use statSync (which follows links) as the authoritative check.
+        const dirs = entries.filter(e => {
+          if (e.isDirectory()) return true
+          if (e.isSymbolicLink()) {
+            try { return statSync(join(dir, e.name)).isDirectory() } catch { return false }
+          }
+          return false
+        })
         return Promise.all(dirs.map(async (entry) => {
           const base = { type: 'model' as const, id: entry.name, name: entry.name, trusted: isBuiltin, builtin: isBuiltin, nodes: [] }
+          const entryPath = join(dir, entry.name)
+
+          // Detect local extensions: check for .modly-local sentinel
+          let localSourcePath: string | undefined
+          if (!isBuiltin) {
+            const sentinelPath = join(entryPath, '.modly-local')
+            if (existsSync(sentinelPath)) {
+              try {
+                localSourcePath = (await readFile(sentinelPath, 'utf-8')).trim()
+              } catch { /* ignore */ }
+            }
+          }
+
           for (const manifestFile of ['manifest.json', 'package.json']) {
-            const p = join(dir, entry.name, manifestFile)
+            const p = join(entryPath, manifestFile)
             if (existsSync(p)) {
               try {
                 const raw    = await readFile(p, 'utf-8')
                 const parsed = JSON.parse(raw) as ParsedManifest
+                // Inject local:// source so the UI shows the Local badge
+                if (localSourcePath) parsed.source = `local://${localSourcePath}`
                 return parseExtensionManifest(parsed, entry.name, trustedRepos, isBuiltin)
               } catch { /* ignore parse errors, fall through */ }
             }
@@ -761,11 +1002,17 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const manifestRaw = await readFile(manifestPath, 'utf-8')
       const manifest    = JSON.parse(manifestRaw) as ParsedManifest
 
-      if (!manifest.id) throw new Error('manifest.json: required field "id" missing')
-      const extensionId = assertSafeExtensionId(manifest.id)
+      const { id: rawManifestId, isProcess, entryFile, isPythonProcess, hasNodes } = validateInstallManifest(
+        manifest,
+        {
+          hasEntryFile: (candidate) => existsSync(join(extractDir, candidate)),
+          hasGeneratorFile: () => existsSync(join(extractDir, 'generator.py')),
+        },
+        'repository',
+      )
+      if (!hasNodes) throw new Error('manifest.json: required field "nodes" missing or empty')
+      const extensionId = assertSafeExtensionId(rawManifestId)
       manifest.id = extensionId
-      if (!manifest.nodes?.length) throw new Error('manifest.json: required field "nodes" missing or empty')
-
       // Reject unsupported platforms up front. setup.py would fail anyway,
       // but the failure messages from CUDA-only wheels are confusing on
       // macOS — better to refuse at the install step.
@@ -775,21 +1022,6 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           `Extension "${manifest.id}" is not supported on ${process.platform}. ` +
           `Supported: ${compatPlats.join(', ')}.`,
         )
-      }
-
-      const isProcess = manifest.type === 'process'
-      const entryFile = manifest.entry ?? 'processor.js'
-      const isPythonProcess = isProcess && entryFile.endsWith('.py')
-
-      if (isProcess) {
-        // Process extension validation
-        if (!existsSync(join(extractDir, entryFile)))
-          throw new Error(`manifest.json: entry file "${entryFile}" missing from repository`)
-      } else {
-        // Model extension validation
-        const generatorPath = join(extractDir, 'generator.py')
-        if (!existsSync(generatorPath)) throw new Error('generator.py missing from repository')
-        if (!manifest.generator_class)  throw new Error('manifest.json: required field "generator_class" missing')
       }
 
       // Override source field with the actual GitHub URL so trust is based on
@@ -833,10 +1065,18 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         if (existsSync(join(destDir, 'setup.py'))) {
           emit({ step: 'setting_up', message: 'Setting up Python environment…' })
           const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-          await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
-            logger.info(`[ext-setup] ${line}`)
-            emit({ step: 'setting_up', message: line })
-          })
+          try {
+            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+              logger.info(`[ext-setup] ${line}`)
+              emit({ step: 'setting_up', message: line })
+            })
+          } catch (err) {
+            if (isSetupFailureFatal({ isProcess, isPythonProcess })) {
+              throw new Error(`Extension setup failed: ${err}`)
+            }
+            logger.warn(`[ext-setup] setup.py failed: ${err}`)
+            emit({ step: 'setting_up', message: `Warning: setup failed — ${err}` })
+          }
         }
       } else if (isProcess) {
         // 6b. JS process extension: npm install if package.json present
@@ -971,6 +1211,99 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       return { success: true }
     } catch (err: any) {
       return { success: false, error: `Repair failed: ${err?.message ?? err}` }
+    }
+  })
+
+  // Install a local extension by creating a symlink/junction to a local folder
+  ipcMain.handle('extensions:installFromLocal', async (event) => {
+    const win  = getWindow()
+    const emit = (data: object) => win?.webContents.send('extensions:installProgress', data)
+
+    // 1. Open folder picker
+    const pickResult = await dialog.showOpenDialog(win!, {
+      title:      'Select local extension folder',
+      properties: ['openDirectory'],
+    })
+    if (pickResult.canceled || pickResult.filePaths.length === 0) {
+      return { success: false, cancelled: true }
+    }
+    const localPath = pickResult.filePaths[0]
+
+    try {
+      emit({ step: 'validating' })
+
+      // 2. Read and validate manifest.json
+      const manifestPath = join(localPath, 'manifest.json')
+      if (!existsSync(manifestPath)) {
+        throw new Error('manifest.json not found in the selected folder')
+      }
+      const manifestRaw = await readFile(manifestPath, 'utf-8')
+      const manifest    = JSON.parse(manifestRaw) as ParsedManifest
+
+      const { id: rawManifestId } = validateInstallManifest(
+        manifest,
+        {
+          hasEntryFile:     (candidate) => existsSync(join(localPath, candidate)),
+          hasGeneratorFile: ()          => existsSync(join(localPath, 'generator.py')),
+        },
+        'local folder',
+      )
+      const extensionId = assertSafeExtensionId(rawManifestId)
+
+      // 3. Create symlink / junction in extensionsDir
+      const userData      = app.getPath('userData')
+      const extensionsDir = getSettings(userData).extensionsDir
+      await mkdir(extensionsDir, { recursive: true })
+
+      const linkPath = resolveExtensionPathWithinRoot(extensionsDir, extensionId)
+
+      // Remove any existing symlink/dir at that location
+      if (existsSync(linkPath)) {
+        // Check if it's already linked to the same path
+        try {
+          const stat = await lstat(linkPath)
+          if (stat.isSymbolicLink() || (process.platform === 'win32' && stat.isDirectory())) {
+            await rmAsync(linkPath, { recursive: true, force: true })
+          } else {
+            throw new Error(`A non-symlink folder named "${extensionId}" already exists in extensionsDir. Remove it first.`)
+          }
+        } catch (e: any) {
+          if (e.message?.includes('already exists')) throw e
+          await rmAsync(linkPath, { recursive: true, force: true })
+        }
+      }
+
+      emit({ step: 'setting_up', message: 'Linking local folder…' })
+
+      if (process.platform === 'win32') {
+        // Windows: junction (no elevation needed, works for directories)
+        await symlink(localPath, linkPath, 'junction')
+      } else {
+        // macOS / Linux: standard symlink
+        await symlink(localPath, linkPath)
+      }
+
+      // Write sentinel so extensions:list can detect this as a local extension
+      // The sentinel lives in the linked folder (= the original local folder), so
+      // it persists even if Modly is restarted. The content is the absolute path.
+      await writeFile(join(linkPath, '.modly-local'), localPath, 'utf-8')
+
+      // 4. Hot-reload Python registry so it picks up the new extension
+      try {
+        await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
+      } catch { /* Python might not be running yet */ }
+
+      emit({ step: 'done', extensionId })
+
+      const trustedRepos = await fetchTrustedRepos()
+      // Build manifest with localPath marker so the UI can identify local extensions
+      const annotatedManifest = { ...manifest, source: `local://${localPath}` }
+      const ext = parseExtensionManifest(annotatedManifest, extensionId, trustedRepos)
+      return { success: true, extensionId, extension: ext, localPath }
+
+    } catch (err) {
+      emit({ step: 'error', message: String(err) })
+      return { success: false, error: String(err) }
     }
   })
 

@@ -19,15 +19,15 @@ Modly is a desktop application for Windows, Linux, and macOS (Apple Silicon — 
 
 ## Download
 
-Head to the [Releases](../../releases/latest) page to download the latest installer for Windows or Linux.
+Head to the [Releases](../../releases/latest) page to download the latest installer for Windows, Linux, or Apple Silicon macOS.
 
 Alternatively, you can clone the repository and run the app directly without installing:
 
 ```bash
 # Windows
-launcher.bat
+launch.bat
 
-# Linux
+# Linux / macOS
 ./launcher.sh
 ```
 
@@ -59,11 +59,28 @@ pip install -r requirements.txt
 npm run dev
 ```
 
+### 4. Test
+
+```bash
+npm test
+./node_modules/.bin/tsc --noEmit -p tsconfig.node.json
+npm run build
+```
+
+## Platform notes
+
+- macOS support targets Apple Silicon only.
+- macOS uses native window controls. Windows and Linux keep the existing custom controls.
+- The top bar includes a live RAM indicator sourced from the main process.
+- Workflow wiring is validated before run; invalid graphs stay in place and surface inline/toast warnings instead of dropping the current mesh view.
+- Package Apple Silicon macOS with `npm run package:mac`.
+- Imported meshes can be smoothed and decimated in-app; optimized results are written back into the workspace.
+
 ---
 
 ## Extension system
 
-Modly supports external AI model extensions. Each extension is a GitHub repository containing a `manifest.json` and a `generator.py`.
+Modly supports external model and process extensions. Each extension is a GitHub repository containing a `manifest.json` plus the runtime entry files required by its type.
 
 ### Official extensions
 
@@ -85,20 +102,36 @@ Modly supports external AI model extensions. Each extension is a GitHub reposito
 
 ![Enter extension URL](docs/install-extension.png)
 
-**3.** Once the extension is installed, download the model or one of its variants.
+**3.** If the extension exposes model nodes, download the model or one of its variants. Process extensions are ready once installation and setup complete.
 
 ![Install models](docs/install-models.png)
 
 ---
 
-### Community 
+## Modly CLI
+
+Agents and scripts can call a running Modly desktop app without using the UI via the stdlib-only CLI. The CLI is a thin helper over Modly's canonical automation concepts and keeps final machine-readable JSON on stdout:
+
+```bash
+python tools/modly-cli/agent.py health
+python tools/modly-cli/agent.py model list
+python tools/modly-cli/agent.py workflow-run status <run_id>
+python tools/modly-cli/agent.py generate --image ./input.png --output ./export.glb
+```
+
+Canonical commands are `health`, `model`, `workflow-run`, `capability`, and `process-run`. The friendly `generate` command starts `POST /workflow-runs/from-image`, polls the returned run, exports the final mesh when requested, and includes recovery metadata such as `workflow-run status ...` and `workflow-run cancel ...` in the JSON response.
+
+Compatibility and helper surfaces are intentionally separated: `legacy` wraps old `/generate/*` job endpoints, `dev serve-api` / `dev ensure-server` start only the FastAPI backend and do not prove Electron/Desktop bridge readiness, and `experimental comfy-image` / `experimental generate-from-workflow` are external ComfyUI orchestration helpers rather than the canonical Modly agent contract. Hidden helper aliases such as `status`, `export`, and `batch` remain parseable for scripts, but they are not presented as canonical root commands.
+
+`experimental generate-from-workflow --workflow <name> --output <path>` treats `--output` as the final artifact location. When the ComfyUI workflow produces a downloadable 3D asset, the CLI downloads it directly; image-only workflows remain a compatibility path through Modly image-to-3D generation.
+
+See `tools/modly-cli/SKILL.md` for the agent workflow and output contract.
+
+---
+
+### Community
 
 Join the [Discord server](https://discord.gg/BvjDCvS3yr) to stay up to date with the latest news, report bugs, and share feedback.
-
-Follow Modly and its development on X:
-
-- [Modly on X](https://x.com/modly3d)
-- [Lightning Pixel on X](https://x.com/lightningpiixel)
 
 ---
 

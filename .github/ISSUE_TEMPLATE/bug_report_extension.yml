@@ -1,0 +1,80 @@
+name: 🧩 Bug report — Official extension
+description: Report a bug in one of Modly's official extensions
+labels: [bug, extension, "pending triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before You Start...**
+
+        This form is only for bugs in **official extensions** shipped with Modly.
+        For core app bugs, use the regular *Bug report* instead.
+        - Search existing issues — your problem may already be reported or fixed in a newer version.
+        - Make sure the extension is up to date — **extensions do not update automatically**, so a fix may already be available in a newer version.
+        - Try to **repair** the extension, or **uninstall and reinstall** it — this fixes most issues.
+        - For usage questions, join the [Discord Chat](https://discord.gg/T7uQJWnNgr).
+  - type: input
+    id: extension
+    attributes:
+      label: Which official extension?
+      description: Name of the official extension affected.
+      placeholder: e.g. modly-hunyuan3d-mini-extension
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Open the extension '...'
+        2. Apply '...'
+        3. See the error
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Modly version
+      description: Which version of Modly are you running? (Help → About, or package.json)
+      placeholder: 0.3.5
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11 / macOS 14 (arm64) / Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: Which GPU are you using? (Modly runs locally on your GPU)
+      placeholder: e.g. NVIDIA RTX 4070 / Apple M3 / AMD RX 7800 XT
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Screenshots & logs
+      description: Add screenshots and any relevant log output to help explain the problem.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have searched existing issues and this has not been reported yet.
+          required: true
+        - label: I can reproduce this on the latest version of Modly.
+          required: true

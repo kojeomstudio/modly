@@ -115,7 +115,7 @@ export function StorageSection(): JSX.Element {
   }
 
   async function handleBrowseModels() {
-    const newPath = await window.electron.fs.selectDirectory()
+    const newPath = await window.electron.fs.selectDirectory(modelsDir)
     if (!newPath || newPath === modelsDir) return
 
     const models = await window.electron.fs.listDir(modelsDir)
@@ -129,7 +129,7 @@ export function StorageSection(): JSX.Element {
   }
 
   async function handleBrowseWorkspace() {
-    const newPath = await window.electron.fs.selectDirectory()
+    const newPath = await window.electron.fs.selectDirectory(workspaceDir)
     if (!newPath || newPath === workspaceDir) return
 
     const items = await window.electron.fs.listDir(workspaceDir)
@@ -143,7 +143,7 @@ export function StorageSection(): JSX.Element {
   }
 
   async function handleBrowseWorkflows() {
-    const newPath = await window.electron.fs.selectDirectory()
+    const newPath = await window.electron.fs.selectDirectory(workflowsDir)
     if (!newPath || newPath === workflowsDir) return
 
     const items = await window.electron.fs.listDir(workflowsDir)
